@@ -1,4 +1,4 @@
-# pai-acp
+# billion-context-pi
 
 [English](./README.md) | [中文](./README.zh-CN.md)
 
@@ -11,13 +11,13 @@ The model decides <em>when</em> and <em>what</em> to compress — not a hard lim
 ---
 
 <p align="center">
-<a href="https://www.npmjs.com/package/pai-acp"><img src="https://img.shields.io/npm/v/pai-acp.svg?style=flat-square" alt="npm"></a>
-<a href="https://github.com/ranxianglei/pai-acp/blob/master/LICENSE"><img src="https://img.shields.io/npm/l/pai-acp.svg?style=flat-square" alt="license"></a>
-<a href="https://github.com/ranxianglei/pai-acp"><img src="https://img.shields.io/badge/GitHub-ranxianglei%2Fpai--acp-181717?style=flat-square&logo=github" alt="GitHub"></a>
+<a href="https://www.npmjs.com/package/billion-context-pi"><img src="https://img.shields.io/npm/v/billion-context-pi.svg?style=flat-square" alt="npm"></a>
+<a href="https://github.com/ranxianglei/billion-context-pi/blob/master/LICENSE"><img src="https://img.shields.io/npm/l/billion-context-pi.svg?style=flat-square" alt="license"></a>
+<a href="https://github.com/ranxianglei/billion-context-pi"><img src="https://img.shields.io/badge/GitHub-ranxianglei%2Fbillion--context--pi-181717?style=flat-square&logo=github" alt="GitHub"></a>
 </p>
 
 <p align="center">
-<code>pi install npm:pai-acp</code>
+<code>pi install npm:billion-context-pi</code>
 </p>
 
 ---
@@ -40,12 +40,12 @@ This means:
 ## Install
 
 ```bash
-pi install npm:pai-acp
+pi install npm:billion-context-pi
 ```
 
 That's it. The extension auto-loads on next Pi startup. No configuration needed — it reads your model's context window automatically.
 
-> **Uninstall `pi-subagents` first (optional, recommended).** pai-acp ships its own `acp_delegate` sub-agent tool (see below) that replaces pi-subagents at a fraction of the context cost (~600 tok vs ~7K tok/turn). If you have pi-subagents installed, remove it to avoid duplicate delegation tools:
+> **Uninstall `pi-subagents` first (optional, recommended).** billion-context-pi ships its own `acp_delegate` sub-agent tool (see below) that replaces pi-subagents at a fraction of the context cost (~600 tok vs ~7K tok/turn). If you have pi-subagents installed, remove it to avoid duplicate delegation tools:
 > ```bash
 > pi remove npm:pi-subagents
 > ```
@@ -101,7 +101,7 @@ Rich status display for the user:
 ╭─────────────────────────────────────────────╮
 │           ACP Context Analysis              │
 ╰─────────────────────────────────────────────╯
- pai-acp@0.1.14
+ billion-context-pi@0.1.14
 
 Context: 12% (120K / 1.0M)
 Growth: +15K since last nudge
@@ -121,7 +121,7 @@ Blocks: 3 active (3.7K summary, 15.2K original compressed)
 
 ## Configuration
 
-pai-acp works out of the box with no configuration. Three optional keys can be set in a JSON config file.
+billion-context-pi works out of the box with no configuration. Three optional keys can be set in a JSON config file.
 
 ### Config file
 

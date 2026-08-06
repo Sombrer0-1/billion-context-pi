@@ -9,13 +9,13 @@
 ---
 
 <p align="center">
-<a href="https://www.npmjs.com/package/pai-acp"><img src="https://img.shields.io/npm/v/pai-acp.svg?style=flat-square" alt="npm"></a>
-<a href="https://github.com/ranxianglei/pai-acp/blob/master/LICENSE"><img src="https://img.shields.io/npm/l/pai-acp.svg?style=flat-square" alt="license"></a>
-<a href="https://github.com/ranxianglei/pai-acp"><img src="https://img.shields.io/badge/GitHub-ranxianglei%2Fpai--acp-181717?style=flat-square&logo=github" alt="GitHub"></a>
+<a href="https://www.npmjs.com/package/billion-context-pi"><img src="https://img.shields.io/npm/v/billion-context-pi.svg?style=flat-square" alt="npm"></a>
+<a href="https://github.com/ranxianglei/billion-context-pi/blob/master/LICENSE"><img src="https://img.shields.io/npm/l/billion-context-pi.svg?style=flat-square" alt="license"></a>
+<a href="https://github.com/ranxianglei/billion-context-pi"><img src="https://img.shields.io/badge/GitHub-ranxianglei%2Fbillion--context--pi-181717?style=flat-square&logo=github" alt="GitHub"></a>
 </p>
 
 <p align="center">
-<code>pi install npm:pai-acp</code>
+<code>pi install npm:billion-context-pi</code>
 </p>
 
 ---
@@ -39,12 +39,12 @@
 ## 安装
 
 ```bash
-pi install npm:pai-acp
+pi install npm:billion-context-pi
 ```
 
 完成。扩展在下次 Pi 启动时自动加载。无需配置 —— 它会自动读取模型的上下文窗口。
 
-> **建议先卸载 `pi-subagents`(可选,推荐)。** pai-acp 自带 `acp_delegate` 子代理工具(见下文),以极低的上下文成本(~600 tok vs ~7K tok/轮)替代 pi-subagents。如果你已安装 pi-subagents,卸载它以避免重复的委派工具:
+> **建议先卸载 `pi-subagents`(可选,推荐)。** billion-context-pi 自带 `acp_delegate` 子代理工具(见下文),以极低的上下文成本(~600 tok vs ~7K tok/轮)替代 pi-subagents。如果你已安装 pi-subagents,卸载它以避免重复的委派工具:
 > ```bash
 > pi remove npm:pi-subagents
 > ```
@@ -100,7 +100,7 @@ Pi 内置的自动压缩会被取消 —— ACP 是唯一的上下文管理者�
 ╭─────────────────────────────────────────────╮
 │           ACP Context Analysis              │
 ╰─────────────────────────────────────────────╯
- pai-acp@0.1.14
+ billion-context-pi@0.1.14
 
 Context: 12% (120K / 1.0M)
 Growth: +15K since last nudge
@@ -120,7 +120,7 @@ Blocks: 3 active (3.7K summary, 15.2K original compressed)
 
 ## 配置
 
-pai-acp 开箱即用,无需任何配置。可以在 JSON 配置文件中设置三个可选 key。
+billion-context-pi 开箱即用,无需任何配置。可以在 JSON 配置文件中设置三个可选 key。
 
 ### 配置文件
 

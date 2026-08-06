@@ -1,10 +1,10 @@
-# pai-acp Development Specification
+# billion-context-pi Development Specification
 
 > **This document is the highest-priority specification. All developers (including AI Agents) MUST comply.**
 
 ## 1. Project Overview
 
-**pai-acp** is the [Pi coding agent](https://github.com/nickthecook/pi) adapter for ACP (Active Context Pruning). It wires acp-kernel's compression pipeline into Pi's extension system, providing model-driven context management.
+**billion-context-pi** is the [Pi coding agent](https://github.com/nickthecook/pi) adapter for ACP (Active Context Pruning). It wires acp-kernel's compression pipeline into Pi's extension system, providing model-driven context management.
 
 ### Tech Stack
 
@@ -20,8 +20,8 @@
 
 | Field | Value |
 |-------|-------|
-| npm package | `pai-acp` |
-| GitHub | https://github.com/ranxianglei/pai-acp |
+| npm package | `billion-context-pi` |
+| GitHub | https://github.com/ranxianglei/billion-context-pi |
 | License | MIT |
 
 ## 2. Architecture
@@ -74,7 +74,7 @@ npm test               # node --import tsx --test tests/*.test.ts
 
 ```bash
 npm run build
-cp dist/index.js ~/.pi/agent/npm/node_modules/pai-acp/dist/index.js
+cp dist/index.js ~/.pi/agent/npm/node_modules/billion-context-pi/dist/index.js
 # Restart Pi to pick up changes
 ```
 
@@ -103,9 +103,9 @@ Same baseline as acp-kernel (branch naming, CI auto-publish, PR-merge-is-human-o
 ⚠️ **Publishing order is strict:**
 1. Release `acp-kernel` first (open + merge its release PR, wait for CI publish).
 2. **Verify it is live on npm:** `npm view acp-kernel version` returns the new version.
-3. THEN release pai-acp.
+3. THEN release billion-context-pi.
 
-Rationale: pai-acp CI runs `npm ci`, which installs the exact `acp-kernel` version pinned in `package.json`. A release branch that bumps `acp-kernel` to a not-yet-published version fails CI at install time.
+Rationale: billion-context-pi CI runs `npm ci`, which installs the exact `acp-kernel` version pinned in `package.json`. A release branch that bumps `acp-kernel` to a not-yet-published version fails CI at install time.
 
 ### Local pre-validation (saves a round-trip)
 
@@ -115,20 +115,20 @@ Before waiting for npm, validate the upgrade path locally using acp-kernel's own
 # 1. In acp-kernel (on master):
 npm run build
 
-# 2. In pai-acp: overlay the new dist onto node_modules (local only, do NOT commit)
+# 2. In billion-context-pi: overlay the new dist onto node_modules (local only, do NOT commit)
 cp ~/projects/acp-kernel/dist/index.js     node_modules/acp-kernel/dist/index.js
 cp ~/projects/acp-kernel/dist/index.js.map node_modules/acp-kernel/dist/index.js.map
 
-# 3. Bump package.json (both lines, see below), then run pai-acp CI checks
+# 3. Bump package.json (both lines, see below), then run billion-context-pi CI checks
 npm run typecheck && npm test && npm run build
 ```
 
-### pai-acp release commit — TWO version fields
+### billion-context-pi release commit — TWO version fields
 
-Unlike acp-kernel (one line), a pai-acp release commit bumps BOTH its own version AND the `acp-kernel` dependency:
+Unlike acp-kernel (one line), a billion-context-pi release commit bumps BOTH its own version AND the `acp-kernel` dependency:
 
 ```diff
-   "name": "pai-acp",
+   "name": "billion-context-pi",
 -  "version": "0.1.12",
 +  "version": "0.1.13",
    ...
