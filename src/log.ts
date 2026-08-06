@@ -1,8 +1,9 @@
 import { promises as fs } from "node:fs";
 import * as path from "node:path";
+import { homedir } from "node:os";
 
 const ENV_DEBUG = process.env.ACP_DEBUG === "1" || process.env.ACP_DEBUG === "true";
-const LOG_FILE = process.env.ACP_LOG_FILE ?? path.join(process.env.HOME ?? "/tmp", ".pi", "acp-debug.log");
+const LOG_FILE = process.env.ACP_LOG_FILE ?? path.join(homedir(), ".pi", "acp-debug.log");
 
 let runtimeDebug: boolean | null = null;
 let initialized = false;

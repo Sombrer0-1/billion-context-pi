@@ -1,6 +1,6 @@
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 
-const DELEGATE_WIDGET_KEY = "pai-acp-delegates";
+const DELEGATE_WIDGET_KEY = "billion-context-pi-delegates";
 const REFRESH_MS = 500;
 const MAX_TASK_LEN = 48;
 

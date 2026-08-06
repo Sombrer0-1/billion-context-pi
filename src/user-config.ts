@@ -1,5 +1,6 @@
 import { promises as fs } from "node:fs";
 import * as path from "node:path";
+import { homedir } from "node:os";
 import { CONFIG_DIR_NAME } from "@earendil-works/pi-coding-agent";
 import type { AdapterConfig } from "./config.js";
 import { debug } from "./log.js";
@@ -17,7 +18,7 @@ export interface UserAcpConfig {
 /** Read global + project acp.json, project overrides global. Returns {} on any
  *  error (missing file, bad JSON) — never throws. */
 export async function loadUserConfig(cwd: string): Promise<UserAcpConfig> {
-  const home = process.env.HOME ?? "";
+  const home = homedir();
   const merged: UserAcpConfig = {};
   for (const base of [join(home, CONFIG_DIR_NAME), join(cwd, CONFIG_DIR_NAME)]) {
     const file = join(base, "acp.json");

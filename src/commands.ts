@@ -113,7 +113,7 @@ async function statusReport(runtime: AcpRuntime, ctx: ExtensionCommandContext): 
 
   const lines: string[] = [];
 
-  const versionStr = CURRENT_VERSION ? `pai-acp@${CURRENT_VERSION}` : "";
+  const versionStr = CURRENT_VERSION ? `billion-context-pi@${CURRENT_VERSION}` : "";
 
   lines.push("╭─────────────────────────────────────────────╮");
   lines.push("│           ACP Context Analysis              │");

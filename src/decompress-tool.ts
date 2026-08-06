@@ -6,10 +6,10 @@ import { parseBlockIdArg, collectBlockContent } from "acp-kernel";
 import { entriesToCoreMessages } from "./messages.js";
 import { writeFile, mkdir } from "node:fs/promises";
 import { resolve, relative, isAbsolute, join } from "node:path";
-import { tmpdir } from "node:os";
+import { tmpdir, homedir } from "node:os";
 
 /** Directory for auto-generated decompress output files. */
-const AUTO_DIR = join(process.env.HOME ?? tmpdir(), ".cache", "pi", "acp-decompress");
+const AUTO_DIR = join(homedir() || tmpdir(), ".cache", "pi", "acp-decompress");
 
 /** Maximum chars of a head preview included in the tool result for file mode. */
 const PREVIEW_CHARS = 600;
@@ -54,13 +54,13 @@ export function makeDecompressTool(runtime: AcpRuntime): ToolDefinition<typeof D
  *  arbitrary filesystem locations. */
 const ALLOWED_DIRS = [
   tmpdir(),
-  join(process.env.HOME ?? "", ".cache", "opencode"),
-  join(process.env.HOME ?? "", ".cache", "pi"),
+  join(homedir(), ".cache", "opencode"),
+  join(homedir(), ".cache", "pi"),
 ];
 
 function resolveToFilePath(targetPath: string): string | { error: string } {
   const expanded = targetPath.startsWith("~/")
-    ? join(process.env.HOME ?? "", targetPath.slice(2))
+    ? join(homedir(), targetPath.slice(2))
     : targetPath;
   const resolved = resolve(expanded);
   const isAllowed = ALLOWED_DIRS.some((dir) => {

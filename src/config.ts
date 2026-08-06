@@ -10,7 +10,7 @@ export interface AdapterConfig {
   modelContextLimit?: number;
   protectedTools?: string[];
   preserveRecentMessages?: number;
-  /** Check npm for a newer pai-acp on startup and auto-install it. Default: true.
+  /** Check npm for a newer billion-context-pi on startup and auto-install it. Default: true.
    *  Disable via `autoUpdate: false` or env `ACP_AUTO_UPDATE=0` to avoid all
    *  network calls on startup. */
   autoUpdate?: boolean;

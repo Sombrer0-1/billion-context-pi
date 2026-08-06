@@ -2,15 +2,16 @@ import { readFile, writeFile, mkdir } from "node:fs/promises";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { execFile } from "node:child_process";
+import { homedir } from "node:os";
 import { debug } from "./log.js";
 
 declare const CURRENT_VERSION: string;
 
-const PACKAGE_NAME = "pai-acp";
+const PACKAGE_NAME = "billion-context-pi";
 const REGISTRY_URL = `https://registry.npmjs.org/${PACKAGE_NAME}/latest`;
 const SEMVER_RE = /^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z-.]+)?$/;
 const CHECK_INTERVAL_MS = 3 * 60 * 1000;
-const THROTTLE_FILE = `${process.env.HOME ?? ""}/.pi/agent/.pai-acp-update-check`;
+const THROTTLE_FILE = join(homedir(), ".pi", "agent", ".billion-context-pi-update-check");
 
 // Guards against concurrent checks: the context event fires on every LLM call,
 // so several can race past the throttle read before any writes the timestamp.
