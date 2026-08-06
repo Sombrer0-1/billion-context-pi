@@ -1,6 +1,6 @@
 {
 	"name": "billion-context-pi",
-	"version": "0.0.6",
+	"version": "0.1.23",
 	"description": "One billion, not one million. Model-driven context management for the Pi coding agent.",
 	"main": "dist/index.js",
 	"types": "dist/index.d.ts",
@@ -27,7 +27,7 @@
 		"url": "git+https://github.com/ranxianglei/billion-context-pi.git"
 	},
 	"bugs": {
-		"url": "https://github.com/ranxianglei/pai-acp/issues"
+		"url": "https://github.com/ranxianglei/billion-context-pi/issues"
 	},
 	"publishConfig": {
 		"access": "public"
