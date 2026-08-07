@@ -75,7 +75,7 @@ async function handleCompress(args: CompressArgs, runtime: AcpRuntime, ctx: Exte
     config,
   });
   await runtime.save(applied.state, ctx);
-  const { blocksCreated, tokensCompressed, errors } = applied.result;
+  const { blocksCreated, tokensCompressed, errors, warnings } = applied.result;
 
   const afterTokens = Math.max(0, beforeTokens - tokensCompressed);
 
@@ -95,6 +95,7 @@ async function handleCompress(args: CompressArgs, runtime: AcpRuntime, ctx: Exte
   });
 
   const lines = [`▣ ACP | ${formatK(beforeTokens)} → ${formatK(afterTokens)} tokens (~${formatK(tokensCompressed)} reclaimed, ${blocksCreated} block${blocksCreated > 1 ? "s" : ""})`];
+  if (warnings.length > 0) lines.push("⚠️ " + warnings.join("; "));
   if (errors.length > 0) lines.push("Errors: " + errors.join("; "));
   return lines.join("\n");
 }
