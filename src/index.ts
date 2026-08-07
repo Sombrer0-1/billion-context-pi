@@ -208,7 +208,17 @@ function wireSystemPrompt(pi: ExtensionAPI, runtime: AcpRuntime): void {
 function collectOriginals(entries: ReturnType<ExtensionContext["sessionManager"]["buildContextEntries"]>): Map<string, AgentMessage> {
   const map = new Map<string, AgentMessage>();
   for (const entry of entries) {
-    if (entry.type === "message") map.set(entry.id, entry.message);
+    if (entry.type === "message") {
+      map.set(entry.id, entry.message);
+    } else if (entry.type === "custom_message") {
+      // Pi's convertToLlm projects custom messages as { role: "user", content }
+      // for the LLM. Mirror that here so coreOutToAgentMessages restores a
+      // proper user AgentMessage — using role:"custom" would be dropped by Pi.
+      const content = typeof entry.content === "string"
+        ? [{ type: "text" as const, text: entry.content }]
+        : entry.content;
+      map.set(entry.id, { role: "user", content } as AgentMessage);
+    }
   }
   return map;
 }

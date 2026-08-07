@@ -15,7 +15,17 @@ const REF_TAG = new RegExp("^(?:\x3cacp\\s[^>]*\x3em\\d{5}\x3c/acp\x3e|\\[m\\d{1
 export function entriesToCoreMessages(entries: SessionEntry[]): CoreMessage[] {
   const out: CoreMessage[] = [];
   for (const entry of entries) {
-    if (entry.type !== "message") continue;
+    if (entry.type !== "message") {
+      // custom_message participates in LLM context per Pi native semantics
+      // (session-manager.d.ts) — project it as a user message.
+      if (entry.type === "custom_message") {
+        const text = extractText(entry.content);
+        if (text.length > 0) {
+          out.push({ id: entry.id, role: "user", contentType: "text", text });
+        }
+      }
+      continue;
+    }
     const cores = projectMessage(entry.message, entry.id);
     out.push(...cores);
   }
