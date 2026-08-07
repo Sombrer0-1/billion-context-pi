@@ -481,7 +481,7 @@ async function runDelegate(
   return formatSyncResult(args.agent, runId, args.task, result, file);
 }
 
-async function buildChildArgs(
+export async function buildChildArgs(
   args: DelegateArgs,
   rolePrompt: string,
   ctx: ExtensionContext,
@@ -493,6 +493,13 @@ async function buildChildArgs(
   await writeFile(promptFile, `${rolePrompt}\n\n---\n\nComplete the task below.`, "utf8");
 
   const cliArgs = ["-p", "--no-session", "--append-system-prompt", promptFile];
+
+  // Pass the role's tool whitelist to the child (--tools is Pi CLI native).
+  // read-only roles must not receive edit/write; also disables child extension tools.
+  const agentDef = AGENTS[args.agent];
+  if (agentDef?.tools) {
+    cliArgs.push("--tools", agentDef.tools);
+  }
 
   if (args.model && args.model.includes("/")) {
     const [providerId, ...rest] = args.model.split("/");
