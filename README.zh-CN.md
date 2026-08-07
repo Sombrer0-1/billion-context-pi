@@ -1,7 +1,7 @@
 [English](./README.md) | [中文](./README.zh-CN.md)
 
 <p align="center">
-<strong>主动上下文剪枝</strong> — <a href="https://pi.dev">Pi</a> 的 ACP 插件
+<strong>Billion-Context</strong> — <a href="https://pi.dev">Pi</a> 的上下文压缩插件
 <br />
 由模型决定<em>何时</em>压缩、压缩<em>什么</em> — 而非硬性截断。
 </p>
@@ -20,11 +20,11 @@
 
 ---
 
-## 为什么选择 ACP
+## 为什么选择 billion-context
 
-当对话变长,模型的上下文会耗尽。多数工具采用硬截断 —— 静默丢弃早期消息。**ACP** 把 `compress` 工具交给模型:由 LLM 决定**何时**压缩、压缩**什么**,将内容压缩成高保真摘要,在回收上下文空间的同时保留关键细节(文件路径、决策、错误字符串)。
+当对话变长,模型的上下文会耗尽。多数工具采用硬截断 —— 静默丢弃早期消息。**billion-context** 把 `compress` 工具交给模型:由 LLM 决定**何时**压缩、压缩**什么**,将内容压缩成高保真摘要,在回收上下文空间的同时保留关键细节(文件路径、决策、错误字符串)。
 
-与 Pi 内置的自动压缩(把所有内容替换成单个摘要)不同,ACP:
+与 Pi 内置的自动压缩(把所有内容替换成单个摘要)不同,billion-context:
 
 - **保留结构** — 压缩的范围变成带标签的块,可后续解压
 - **多级压缩** — 摘要可被进一步蒸馏(T1 → T2 → T3),随会话增长保持有界
@@ -51,7 +51,7 @@ pi install npm:billion-context-pi
 
 ## 工作原理
 
-ACP 拦截 Pi 的 `context` 事件(每次 LLM 调用前触发),运行一个 8 阶段管线:
+billion-context 拦截 Pi 的 `context` 事件(每次 LLM 调用前触发),运行一个 8 阶段管线:
 
 ```
 assign refs → sync blocks → prune → filter → hide calls → recommend → nudge → emergency truncate
@@ -59,7 +59,7 @@ assign refs → sync blocks → prune → filter → hide calls → recommend �
 
 每条消息获得一个不可见的 `<acp>` 引用标签(`m00001`、`m00002`、...),对模型可见但用户不可见。模型用这些引用来指定压缩范围。
 
-Pi 内置的自动压缩会被取消 —— ACP 是唯一的上下文管理者。
+Pi 内置的自动压缩会被取消 —— billion-context 是唯一的上下文管理者。
 
 ## 插件兼容性与排序
 
@@ -168,7 +168,7 @@ billion-context-pi 开箱即用,无需任何配置。可以在 JSON 配置文件
 
 ### 哪些内容会被保护
 
-ACP 保护三类内容不被压缩:
+billion-context 保护三类内容不被压缩:
 
 1. **永久保护的工具** — `compress` 调用被硬保护(它们是承载关键元数据的;压缩它们会破坏 decompress 和"摘要是历史"的契约)。
 2. **软近期区** — 最后 N 条消息(默认 5)和最后约 5K token 被软保护,让模型保留工作集。来自 `decompress`、`search_context`、`read`、`bash` 的工具结果被**排除**出此区:它们体量大、消费后就该能压缩,所以不该占用保护预算。
