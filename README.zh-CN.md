@@ -142,8 +142,8 @@ billion-context-pi 开箱即用,无需任何配置。可以在 JSON 配置文件
   "autoUpdate": true,
   "modelContextLimit": 200000,
   "delegate": true,
-  "toolBashDefaultTimeout": 600,
-  "toolOutputMaxBytes": 0
+  "toolBashDefaultTimeout": 60,
+  "toolOutputMaxBytes": 200000
 }
 ```
 
@@ -153,8 +153,8 @@ billion-context-pi 开箱即用,无需任何配置。可以在 JSON 配置文件
 | `autoUpdate` | `true` | Pi 启动时检查 npm 是否有更新版本并自动安装(限频:每 3 分钟最多一次检查)。禁用以避免所有启动时的网络请求。 |
 | `modelContextLimit` | *(自动)* | 覆盖上下文上限(token 数)。默认为模型的 `contextWindow`。 |
 | `delegate` | `true` | 启用 `acp_delegate` 工具(delegate/wait/cancel)及其系统提示词段落。设为 `false` 则不注册这些工具(例如你用了别的子代理扩展,或跑 headless 场景异步注入没有意义)。 |
-| `toolBashDefaultTimeout` | `600` | 当模型未指定 `timeout` 时注入 `bash` 工具的超时秒数。Pi **本身没有默认超时**,不加这个,一次遗漏的超时可能挂起几千秒。设为 `0` 恢复 Pi 的无界行为。 |
-| `toolOutputMaxBytes` | `0`(关闭) | 可选的工具结果文本硬上限(字节,通过 `tool_result` hook 应用)。Pi 自身已按 50KB/2000 行截断;设更小(如 `8192`)可作为上下文预算的更紧安全网。超限输出会从头截断并附提示;对 `bash`,完整输出仍保留在其临时文件(`BashToolDetails.fullOutputPath`)中。 |
+| `toolBashDefaultTimeout` | `60` | 当模型未指定 `timeout` 时注入 `bash` 工具的超时秒数。Pi **本身没有默认超时**,不加这个,一次遗漏的超时可能挂起几千秒。超时后会提示模型用更大的 `timeout` 重跑。设为 `0` 恢复 Pi 的无界行为。 |
+| `toolOutputMaxBytes` | `200000` | 工具结果文本硬上限(字节,约 5000 行 @ ~40 字节/行,通过 `tool_result` hook 应用)。用于兜住 Pi 自身 50KB/2000 行截断管不到的输出(例如 Pi 未加限制的工具)。触发截断时会告诉模型如何查看完整输出——对 `bash`,完整输出在其临时文件(`BashToolDetails.fullOutputPath`)中;设更小(如 `8192`)可更省上下文,设 `0` 关闭。 |
 
 > **只有这六个 key 会被 `acp.json` 读取。** 其他调优参数(`preserveRecentMessages`、`protectedTools`、nudge 阈值)是代码级的,不向用户开放。
 
