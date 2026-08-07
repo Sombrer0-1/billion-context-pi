@@ -3,7 +3,7 @@
 [English](./README.md) | [中文](./README.zh-CN.md)
 
 <p align="center">
-<strong>Active Context Pruning</strong> for <a href="https://pi.dev">Pi</a>
+<strong>Billion-Context</strong> for <a href="https://pi.dev">Pi</a>
 <br />
 The model decides <em>when</em> and <em>what</em> to compress — not a hard limit.
 </p>
@@ -24,9 +24,9 @@ The model decides <em>when</em> and <em>what</em> to compress — not a hard lim
 
 ## Why?
 
-When conversations get long, the model runs out of context. Most tools hard-truncate — silently dropping earlier messages. **ACP** gives the model a `compress` tool: the LLM decides **when** and **what** to compress into high-fidelity summaries, preserving critical details (file paths, decisions, error strings) while reclaiming context space.
+When conversations get long, the model runs out of context. Most tools hard-truncate — silently dropping earlier messages. **billion-context** gives the model a `compress` tool: the LLM decides **when** and **what** to compress into high-fidelity summaries, preserving critical details (file paths, decisions, error strings) while reclaiming context space.
 
-Unlike Pi's built-in auto-compaction (which replaces everything with a single summary), ACP:
+Unlike Pi's built-in auto-compaction (which replaces everything with a single summary), billion-context:
 - **Preserves structure** — compressed ranges become labeled blocks you can decompress later
 - **Multi-tier** — summaries can be further distilled (T1 → T2 → T3) as sessions grow
 - **Searchable** — `search_context` finds information inside compressed blocks without decompressing
@@ -52,7 +52,7 @@ That's it. The extension auto-loads on next Pi startup. No configuration needed 
 
 ## How it works
 
-ACP intercepts Pi's `context` event (fired before each LLM call) and runs an 8-stage pipeline:
+billion-context intercepts Pi's `context` event (fired before each LLM call) and runs an 8-stage pipeline:
 
 ```
 assign refs → sync blocks → prune → filter → hide calls → recommend → nudge → emergency truncate
@@ -60,7 +60,17 @@ assign refs → sync blocks → prune → filter → hide calls → recommend �
 
 Each message gets an invisible `<acp>` ref tag (`m00001`, `m00002`, ...) visible to the model but not the user. The model uses these refs to specify compression ranges.
 
-Pi's built-in auto-compaction is cancelled — ACP is the sole context manager.
+Pi's built-in auto-compaction is cancelled — billion-context is the sole context manager.
+
+## Plugin compatibility & ordering
+
+billion-context takes over context management by intercepting Pi's `context` event. **Pi has no plugin priority mechanism** — when multiple extensions register handlers for the same event, they run in a fixed sequence (load order), with no `priority`/`weight` field and no way for the user to control the order. The `context` event specifically is a *pipeline*: every handler receives the previous handler's output, there is no short-circuit, and the **last** handler has the final say over what reaches the model.
+
+This has two practical implications:
+
+1. **Keep exactly one context-compression plugin installed.** If you run two compression plugins together (e.g. billion-context-pi alongside another), both will rewrite the message list and clobber each other's work — compressed ranges can be re-expanded or corrupted. Pi's built-in auto-compaction is already cancelled automatically by billion-context-pi, but any *third-party* compression/compaction extension should be uninstalled.
+
+2. **Even with a single compression plugin, interference is still possible in rare cases.** Load order under Pi is determined by filesystem discovery order (`fs.readdirSync` over `.pi/extensions/` → global → packages), which is not fully deterministic. If another (non-compression) extension also hooks the `context` event and happens to load *after* billion-context-pi, it could modify the compressed output. billion-context-pi rebuilds its working set from the session log rather than the chained input, which makes it robust to handlers that run *before* it — but it cannot defend against a handler that runs *after* it. This is a limitation of Pi's extension model; if you observe unexpected context behavior, check whether other installed extensions intercept the `context` event.
 
 ## Model-facing tools
 
@@ -159,7 +169,7 @@ The model receives detailed guidance (in its system prompt) on **when** to compr
 
 ### What gets protected
 
-ACP protects three categories of content from compression:
+billion-context protects three categories of content from compression:
 
 1. **Always-protected tools** — `compress` calls are hard-protected (they're load-bearing metadata; compressing them breaks decompress and the "summary is historical" contract).
 2. **Soft recent-zone** — the last N messages (default 5) and last ~5K tokens are soft-protected so the model keeps its working set. Tool results from `decompress`, `search_context`, `read`, and `bash` are **excluded** from this zone: they're large and meant to be compressible once consumed, so they don't eat the protected budget.
