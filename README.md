@@ -62,6 +62,16 @@ Each message gets an invisible `<acp>` ref tag (`m00001`, `m00002`, ...) visible
 
 Pi's built-in auto-compaction is cancelled — billion-context is the sole context manager.
 
+## Plugin compatibility & ordering
+
+billion-context takes over context management by intercepting Pi's `context` event. **Pi has no plugin priority mechanism** — when multiple extensions register handlers for the same event, they run in a fixed sequence (load order), with no `priority`/`weight` field and no way for the user to control the order. The `context` event specifically is a *pipeline*: every handler receives the previous handler's output, there is no short-circuit, and the **last** handler has the final say over what reaches the model.
+
+This has two practical implications:
+
+1. **Keep exactly one context-compression plugin installed.** If you run two compression plugins together (e.g. billion-context-pi alongside another), both will rewrite the message list and clobber each other's work — compressed ranges can be re-expanded or corrupted. Pi's built-in auto-compaction is already cancelled automatically by billion-context-pi, but any *third-party* compression/compaction extension should be uninstalled.
+
+2. **Even with a single compression plugin, interference is still possible in rare cases.** Load order under Pi is determined by filesystem discovery order (`fs.readdirSync` over `.pi/extensions/` → global → packages), which is not fully deterministic. If another (non-compression) extension also hooks the `context` event and happens to load *after* billion-context-pi, it could modify the compressed output. billion-context-pi rebuilds its working set from the session log rather than the chained input, which makes it robust to handlers that run *before* it — but it cannot defend against a handler that runs *after* it. This is a limitation of Pi's extension model; if you observe unexpected context behavior, check whether other installed extensions intercept the `context` event.
+
 ## Model-facing tools
 
 | Tool | What it does |
