@@ -77,7 +77,119 @@ test("entriesToCoreMessages projects user/assistant/toolResult roles and extract
   assert.equal(core[3]!.text, "file contents");
 });
 
-test("entriesToCoreMessages skips non-message entries (compaction, model_change)", () => {
+function customEntry(id: string, customType: string, content: string | unknown[]): SessionEntry {
+  return {
+    type: "custom_message",
+    id,
+    parentId: null,
+    timestamp: new Date().toISOString(),
+    customType,
+    content,
+  } as SessionEntry;
+}
+
+test("entriesToCoreMessages projects custom_message as user message (string content)", () => {
+  const entries: SessionEntry[] = [
+    msgEntry("a", user("hello")),
+    customEntry("b", "subagent_result", "Sub-agent test completed (6s)."),
+    msgEntry("c", user("ok")),
+  ];
+  const core = entriesToCoreMessages(entries);
+
+  assert.equal(core.length, 3, "all 3 entries projected");
+  assert.equal(core[1]!.id, "b");
+  assert.equal(core[1]!.role, "user", "custom_message projected as user");
+  assert.equal(core[1]!.contentType, "text");
+  assert.equal(core[1]!.text, "Sub-agent test completed (6s).");
+});
+
+test("entriesToCoreMessages projects custom_message with array content", () => {
+  const entries: SessionEntry[] = [
+    customEntry("a", "subagent_result", [{ type: "text", text: "Array content here" }]),
+  ];
+  const core = entriesToCoreMessages(entries);
+
+  assert.equal(core.length, 1);
+  assert.equal(core[0]!.role, "user");
+  assert.equal(core[0]!.text, "Array content here");
+});
+
+test("entriesToCoreMessages drops custom_message with empty content", () => {
+  const entries: SessionEntry[] = [
+    msgEntry("a", user("before")),
+    customEntry("b", "subagent_result", ""),
+    msgEntry("c", user("after")),
+  ];
+  const core = entriesToCoreMessages(entries);
+
+  assert.deepEqual(core.map((m) => m.id), ["a", "c"], "empty custom_message skipped");
+});
+
+test("entriesToCoreMessages extracts only text blocks from array content", () => {
+  const entries: SessionEntry[] = [
+    customEntry("a", "subagent_result", [
+      { type: "text", text: "visible text" },
+      { type: "image", url: "https://example.com/img.png" },
+      { type: "text", text: "more text" },
+    ]),
+  ];
+  const core = entriesToCoreMessages(entries);
+
+  assert.equal(core.length, 1, "entry projected");
+  assert.equal(core[0]!.text, "visible text\nmore text", "only text blocks extracted, joined with newline");
+});
+
+test("entriesToCoreMessages drops custom_message with non-text-only array content", () => {
+  const entries: SessionEntry[] = [
+    customEntry("a", "subagent_result", [{ type: "image", url: "https://example.com/img.png" }]),
+  ];
+  const core = entriesToCoreMessages(entries);
+
+  assert.equal(core.length, 0, "non-text array content yields empty text → skipped");
+});
+
+test("custom_message round-trip: entriesToCoreMessages → collectOriginals → coreOutToAgentMessages preserves user role", () => {
+  const entries: SessionEntry[] = [
+    msgEntry("a", user("hello")),
+    customEntry("b", "subagent_result", "Sub-agent test completed (6s)."),
+    msgEntry("c", user("ok")),
+  ];
+
+  // Step 1: entries → CoreMessage[]
+  const coreMessages = entriesToCoreMessages(entries);
+
+  // Step 2: simulate collectOriginals (mirrors src/index.ts collectOriginals logic)
+  // For message entries, the original is entry.message.
+  // For custom_message entries, the original is projected as a user AgentMessage
+  // (NOT role:"custom", which Pi would silently drop).
+  const originalById = new Map<string, SessionMessageEntry["message"]>();
+  for (const entry of entries) {
+    if (entry.type === "message") {
+      originalById.set(entry.id, entry.message);
+    } else if (entry.type === "custom_message") {
+      const content = typeof entry.content === "string"
+        ? [{ type: "text" as const, text: entry.content }]
+        : entry.content;
+      originalById.set(entry.id, { role: "user", content } as SessionMessageEntry["message"]);
+    }
+  }
+
+  // Step 3: coreOutToAgentMessages restores from originalById
+  const out = coreOutToAgentMessages(coreMessages, originalById);
+
+  // The custom_message (id "b") should be restored as role:"user", not role:"custom"
+  const customOut = out.find((m) => (m as { role?: string }).role === "user" &&
+    Array.isArray((m as { content?: unknown[] }).content) &&
+    ((m as { content: Array<{ type?: string; text?: string }> }).content.some((b) => b.text?.includes("Sub-agent test"))));
+  assert.ok(customOut, "custom_message restored as a user message");
+  assert.equal((customOut as { role: string }).role, "user", "role is user, not custom");
+
+  // Ensure no role:"custom" in output (that would be silently dropped by Pi)
+  const customs = out.filter((m) => (m as { role?: string }).role === "custom");
+  assert.equal(customs.length, 0, "no role:custom messages in output");
+});
+
+test("entriesToCoreMessages still skips compaction and model_change", () => {
   const entries: SessionEntry[] = [
     msgEntry("a", user("alpha")),
     { type: "compaction", id: "x", parentId: null, timestamp: "", summary: "s", firstKeptEntryId: "a", tokensBefore: 0 } as SessionEntry,
