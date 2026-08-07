@@ -17,6 +17,7 @@ import { makeCommands } from "./commands.js";
 import { coreOutToAgentMessages } from "./messages.js";
 import { ACP_SYSTEM_PROMPT, ACP_DELEGATE_PROMPT } from "./system-prompt.js";
 import { delegateStatusWidget } from "./fleet-widget.js";
+import { wireToolGuardrails } from "./tool-guardrails.js";
 import { debug, setDebugEnabled } from "./log.js";
 import { collectCoveredMessageIds, estimateTokens, lastUserMessageId } from "./tokens.js";
 import { checkForUpdate } from "./update.js";
@@ -32,6 +33,7 @@ export function createAcpExtension(adapter: AdapterConfig = {}): ExtensionFactor
     wireSessionLifecycle(pi, runtime);
     wireContextTransform(pi, runtime);
     wireSystemPrompt(pi, runtime);
+    wireToolGuardrails(pi, runtime);
     pi.registerTool(makeCompressTool(runtime));
     pi.registerTool(makeDecompressTool(runtime));
     pi.registerTool(makeSearchTool(runtime));

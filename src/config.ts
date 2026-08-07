@@ -21,8 +21,23 @@ export interface AdapterConfig {
    *  section. Default: true. Set `delegate: false` (adapter config or
    *  ~/.pi/acp.json) to skip registering them. */
   delegate?: boolean;
+  /** Default timeout in seconds injected into the bash tool when the model
+   *  omits `timeout`. Pi has NO built-in default, so without this a command
+   *  that the model forgets to time out can hang for thousands of seconds.
+   *  Default: 600 (10 min — covers most builds while catching runaway hangs).
+   *  Set to 0 to disable (restore Pi's unbounded behavior). */
+  toolBashDefaultTimeout?: number;
+  /** Hard byte cap applied to tool result text via the `tool_result` hook.
+   *  Pi already truncates at 50KB/2000 lines; this is a tighter optional safety
+   *  net for context budget. Default: 0 (off — opt-in). When set, oversized
+   *  text output is head-truncated with a notice; bash full output remains in
+   *  its temp file (BashToolDetails.fullOutputPath). */
+  toolOutputMaxBytes?: number;
   coreOverrides?: Partial<Config>;
 }
+
+export const DEFAULT_TOOL_BASH_TIMEOUT = 600;
+export const DEFAULT_TOOL_OUTPUT_MAX_BYTES = 0;
 
 export function resolveConfig(adapter: AdapterConfig, liveContextLimit: number): Config {
   const envLimit = process.env.ACP_MODEL_CONTEXT_LIMIT;

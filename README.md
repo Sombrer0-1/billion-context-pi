@@ -142,7 +142,9 @@ Create `~/.pi/acp.json` (global) and/or `<project>/.pi/acp.json` (project-local,
   "debug": false,
   "autoUpdate": true,
   "modelContextLimit": 200000,
-  "delegate": true
+  "delegate": true,
+  "toolBashDefaultTimeout": 600,
+  "toolOutputMaxBytes": 0
 }
 ```
 
@@ -152,8 +154,10 @@ Create `~/.pi/acp.json` (global) and/or `<project>/.pi/acp.json` (project-local,
 | `autoUpdate` | `true` | On Pi startup, check npm for a newer version and auto-install it (throttled to one check per 3 minutes). Disable to avoid all startup network calls. |
 | `modelContextLimit` | *(auto)* | Override the context limit (in tokens). Defaults to the model's `contextWindow`. |
 | `delegate` | `true` | Enable the `acp_delegate` tools (delegate/wait/cancel) and their system-prompt section. Set `false` to skip registering them (e.g. you use a different sub-agent extension, or run headless where async injection adds no value). |
+| `toolBashDefaultTimeout` | `600` | Seconds injected into the `bash` tool when the model omits `timeout`. Pi has **no** default of its own, so without this a forgotten timeout can hang for thousands of seconds. `0` restores Pi's unbounded behavior. |
+| `toolOutputMaxBytes` | `0` (off) | Optional hard byte cap on tool result text (applied via the `tool_result` hook). Pi already truncates at 50KB/2000 lines; set this lower (e.g. `8192`) for a tighter context-budget safety net. Oversized output is head-truncated with a notice; for `bash`, the full output remains in its temp file (`BashToolDetails.fullOutputPath`). |
 
-> **Only these four keys are read from `acp.json`.** Other tuning knobs (`preserveRecentMessages`, `protectedTools`, nudge thresholds) are code-level and not user-overridable.
+> **Only these six keys are read from `acp.json`.** Other tuning knobs (`preserveRecentMessages`, `protectedTools`, nudge thresholds) are code-level and not user-overridable.
 
 ### Environment variables
 
