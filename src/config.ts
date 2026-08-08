@@ -21,8 +21,27 @@ export interface AdapterConfig {
    *  section. Default: true. Set `delegate: false` (adapter config or
    *  ~/.pi/acp.json) to skip registering them. */
   delegate?: boolean;
+  /** Default timeout in seconds injected into the bash tool when the model
+   *  omits `timeout`. Pi has NO built-in default, so without this a command
+   *  that the model forgets to time out can hang for thousands of seconds.
+   *  Default: 60 (catches hangs quickly). On timeout the model is guided to
+   *  re-run with a larger `timeout`. Set to 0 to disable (restore Pi's
+   *  unbounded behavior). */
+  toolBashDefaultTimeout?: number;
+  /** Hard byte cap applied to tool result text via the `tool_result` hook.
+   *  Default: 200000 (~200KB, roughly 5000 lines at ~40 bytes/line) — a
+   *  generous ceiling that stops runaway output. Pi already caps bash/read/grep
+   *  at 50KB/2000 lines (bash full output is saved to a temp file), so this
+   *  default mainly caps tools Pi doesn't cap. Set lower (e.g. 8192) for a
+   *  tighter context budget, or 0 to disable. When capped, oversized text is
+   *  head-truncated with a notice telling the model how to see the full output
+   *  (bash: read BashToolDetails.fullOutputPath). */
+  toolOutputMaxBytes?: number;
   coreOverrides?: Partial<Config>;
 }
+
+export const DEFAULT_TOOL_BASH_TIMEOUT = 60;
+export const DEFAULT_TOOL_OUTPUT_MAX_BYTES = 200_000;
 
 export function resolveConfig(adapter: AdapterConfig, liveContextLimit: number): Config {
   const envLimit = process.env.ACP_MODEL_CONTEXT_LIMIT;

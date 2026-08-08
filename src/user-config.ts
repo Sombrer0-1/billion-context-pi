@@ -13,6 +13,8 @@ export interface UserAcpConfig {
   autoUpdate?: boolean;
   modelContextLimit?: number;
   delegate?: boolean;
+  toolBashDefaultTimeout?: number;
+  toolOutputMaxBytes?: number;
 }
 
 /** Read global + project acp.json, project overrides global. Returns {} on any
@@ -40,7 +42,7 @@ function join(... parts: string[]): string {
   return path.join(...parts);
 }
 
-const KNOWN = new Set(["debug", "autoUpdate", "modelContextLimit", "delegate"]);
+const KNOWN = new Set(["debug", "autoUpdate", "modelContextLimit", "delegate", "toolBashDefaultTimeout", "toolOutputMaxBytes"]);
 
 function pickKnown(parsed: Record<string, unknown>): UserAcpConfig {
   const out: UserAcpConfig = {};
