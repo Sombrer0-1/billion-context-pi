@@ -41,7 +41,7 @@ function buildMessageOwnerMap(state: CompressionState): Map<string, string> {
 }
 
 function estimateTokens(text: string): number {
-    if (!text) return 0;
+    if (typeof text !== "string" || !text) return 0;
     const cjk = text.match(/[\u4e00-\u9fff\u3040-\u30ff\uac00-\ud7af]/g);
     const cjkCount = cjk?.length ?? 0;
     return cjkCount + Math.ceil((text.length - cjkCount) / 4);

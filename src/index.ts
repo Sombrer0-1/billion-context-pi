@@ -23,6 +23,7 @@ import { collectCoveredMessageIds, estimateTokens, lastUserMessageId } from "./t
 import { checkForUpdate } from "./update.js";
 import { runSetupAndNotify } from "./setup-subagent-tools.js";
 import { loadUserConfig, applyUserConfig } from "./user-config.js";
+import { formatSystemPromptForEvent } from "./compat.js";
 
 type AgentMessage = SessionMessageEntry["message"];
 
@@ -224,14 +225,14 @@ function wireSystemPrompt(pi: ExtensionAPI, runtime: AcpRuntime): void {
   pi.on("before_agent_start", (event) => {
     const delegate = runtime.adapter.delegate !== false;
     const prompt = delegate ? `${ACP_SYSTEM_PROMPT}\n${ACP_DELEGATE_PROMPT}` : ACP_SYSTEM_PROMPT;
-    return { systemPrompt: `${event.systemPrompt}\n\n${prompt}` };
+    return { systemPrompt: formatSystemPromptForEvent(event.systemPrompt, prompt) };
   });
 }
 
-function collectOriginals(entries: ReturnType<ExtensionContext["sessionManager"]["buildContextEntries"]>): Map<string, AgentMessage> {
+function collectOriginals(entries: Array<{ type: string; id: string; message?: AgentMessage; content?: unknown }>): Map<string, AgentMessage> {
   const map = new Map<string, AgentMessage>();
   for (const entry of entries) {
-    if (entry.type === "message") {
+    if (entry.type === "message" && entry.message) {
       map.set(entry.id, entry.message);
     } else if (entry.type === "custom_message") {
       // Pi's convertToLlm projects custom messages as { role: "user", content }
