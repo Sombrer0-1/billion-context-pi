@@ -207,7 +207,7 @@ tokens: countTokens(msg.text ?? "")
 - [x] **已决定**：`acp_status` breakdown **不乘** density——status 显示 kernel 口径（调试视角），
       footer 已显示 provider 真实值，用户有对照
 - [x] **已决定**：T2/T3 pending **不乘** density——summary 短，CJK-aware 足够（§5.7）
-- [ ] `computeProtectedRefs` 的 preserveRecentTokens 改用 countTokens 后，保护区大小变化是否影响行为？（实现阶段验证）
+- [x] **已验证**：`computeProtectedRefs` 的 preserveRecentTokens 改用 countTokens 后，保护区大小变化**影响存在但可控，且是正确方向**——中文消息的保护区物理大小变小（1 字符 ≈ 1 token 而非 0.25），`preserveRecentTokens` 现在保护"最近 N 真实 token"而非"最近 N 字符/4 估算"；`preserveRecentMessages` 作为消息数兜底仍有效（至少保护最近 N 条消息）；nudge 因可压缩范围变大而略微提前，正是校准目的。测试见 `tests/recommend.test.ts` 第 3 例（computeProtectedRefs 注入 countTokens 撑大保护区）。结论：校准后的正确语义，非回归。
 - [x] **已确认**：runtime 拿 modelId 用 `ctx.model.id`（`src/delegate-tool.ts:562`，完整标识符）
 
 ## 9. 问题溯源（哪些关键问题由用户提出）
