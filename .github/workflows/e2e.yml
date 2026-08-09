@@ -1,0 +1,32 @@
+name: E2E
+
+on:
+  pull_request:
+    branches: [master]
+  push:
+    branches: [master]
+
+jobs:
+  e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+      - name: Run e2e regression scenarios
+        run: ./scripts/e2e/run-e2e.sh
+
+  docker:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build e2e image
+        run: docker build -t bcp-e2e -f Dockerfile.e2e .
+      - name: Run e2e in container
+        run: docker run --rm bcp-e2e

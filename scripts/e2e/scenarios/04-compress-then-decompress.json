@@ -1,0 +1,40 @@
+{
+    "name": "compress-then-decompress",
+    "description": "Compress a range into block b1, then decompress b1 (deactivating it). Validates the decompress tool path and that activeBlockCount drops to 0 while the block record persists.",
+    "turns": [
+        {
+            "respond": "text",
+            "userText": "Explain the order-processing service in depth.",
+            "text": "The order-processing service handles the lifecycle of a customer order from creation to fulfillment. The entry point is POST /api/orders at src/orders/create.ts:26, which validates the cart, computes totals (subtotal, tax at src/orders/pricing.ts:30, shipping at src/orders/shipping.ts:18), applies promo codes (src/orders/promo.ts:40), and writes an order record with status 'pending_payment' to the orders table. Idempotency uses an idempotency-key header checked at src/orders/idempotency.ts:14 (24h TTL in Redis). Payment is charged via the payments service client at src/orders/payment.ts:28 (PCI-scoped, tokenized card via Stripe). On payment success the order transitions to 'paid' at src/orders/state-machine.ts:52; on failure it goes to 'payment_failed' and the cart is restored. The state machine at src/orders/state-machine.ts:18 is a finite automaton: pending_payment → paid → fulfilling → shipped → delivered, with terminal states cancelled and refunded; every transition is validated and logged to order_events. Inventory is reserved atomically at src/orders/inventory.ts:34 using a SELECT FOR UPDATE on the sku_stock row within the same DB transaction as the order insert, preventing oversell. Fulfillment is dispatched to the warehouse via a message queue at src/orders/fulfillment.ts:40 (RabbitMQ, queue 'fulfillment_requests'); the warehouse acknowledges receipt and later POSTs a ship event to the webhook at src/orders/webhook.ts:20, which transitions the order to 'shipped' and records the tracking number. Shipping notifications are sent via the notifications service at src/orders/notify.ts:30 (email + SMS, both queued). Refunds are issued at src/orders/refund.ts:24 through the payments client and transition the order to 'refunded'; partial refunds are supported. The order list endpoint GET /api/orders at src/orders/list.ts:18 supports cursor pagination (src/orders/list.ts:32) and filtering by status/date. Concurrency: a per-order lock (Redis Redlock src/orders/lock.ts:16) serializes conflicting transitions."
+        },
+        {
+            "respond": "text",
+            "userText": "Continue with order queries and reporting.",
+            "text": "Order queries and reporting build on the order-processing service. The read model is served from a read replica to keep analytical load off the primary. The order detail endpoint GET /api/orders/:id at src/orders/detail.ts:20 joins the order with its line items, shipments, and events. Complex reporting (revenue by day, top SKUs, conversion funnel) is precomputed by a nightly ETL into the order_facts table at src/reporting/etl.ts:28; the dashboard queries at src/reporting/queries.ts:18 read from order_facts with sub-second latency. Real-time revenue (last 5 minutes) is served from a Redis sorted set updated on each 'paid' transition at src/reporting/realtime.ts:24. Exports (CSV/XLSX) are generated asynchronously by a worker at src/reporting/export.ts:34 and delivered via a presigned S3 URL emailed to the user (src/reporting/export.ts:62). The reporting API supports date-range filters, grouping, and limit (src/reporting/filters.ts:16). Large result sets are streamed via a cursor (src/reporting/stream.ts:20) to avoid memory blowup. Audit: every order mutation is recorded in order_events with actor, before/after diff, and timestamp (src/orders/audit.ts:14); the event-sourced history can rebuild order state at src/orders/replay.ts:30. GDPR data export for a user's orders is produced by src/compliance/export-user.ts:26; right-to-be-forgotten anonymizes PII fields at src/compliance/anonymize.ts:18 while retaining financial records as required by law. Performance SLOs: order detail p99 < 200ms, list p99 < 400ms, dashboard p99 < 800ms (src/orders/slo.ts:12). Load tests at tests/load/orders.ts target 500 RPS on create and 2000 RPS on list."
+        },
+        {
+            "respond": "compress",
+            "userText": "Compress the order-processing discussion now.",
+            "topic": "Order Processing & Reporting",
+            "summary": "## Order Processing & Reporting\n### Lifecycle\n- Create POST /api/orders src/orders/create.ts:26; pricing src/orders/pricing.ts:30; shipping src/orders/shipping.ts:18; promo src/orders/promo.ts:40; status pending_payment. Idempotency src/orders/idempotency.ts:14 (24h Redis).\n- Payment src/orders/payment.ts:28 (Stripe tokenized). State machine src/orders/state-machine.ts:18,52 (pending_payment→paid→fulfilling→shipped→delivered; terminal cancelled/refunded). Inventory reserve SELECT FOR UPDATE src/orders/inventory.ts:34.\n- Fulfillment RabbitMQ src/orders/fulfillment.ts:40; ship webhook src/orders/webhook.ts:20; notify src/orders/notify.ts:30. Refund src/orders/refund.ts:24 (partial ok). Per-order Redlock src/orders/lock.ts:16.\n### Queries/Reporting\n- Detail GET /api/orders/:id src/orders/detail.ts:20 (read replica). List cursor src/orders/list.ts:32. Nightly ETL order_facts src/reporting/etl.ts:28; dashboard src/reporting/queries.ts:18. Realtime rev src/reporting/realtime.ts:24. Export async+presigned S3 src/reporting/export.ts:34,62.\n- Audit order_events src/orders/audit.ts:14; replay src/orders/replay.ts:30. GDPR export src/compliance/export-user.ts:26, anonymize src/compliance/anonymize.ts:18. SLOs src/orders/slo.ts:12 (detail p99<200ms, list<400ms, dashboard<800ms). Load 500/2000 RPS tests/load/orders.ts.",
+            "range": "all"
+        },
+        {
+            "respond": "decompress",
+            "blockId": "b1",
+            "inline": true,
+            "auto": true
+        },
+        {
+            "respond": "text",
+            "text": "Decompression complete. Block b1 has been restored inline.",
+            "auto": true
+        }
+    ],
+    "verify": {
+        "blockCount": 1,
+        "activeBlockCount": 1,
+        "compressionCount": 1,
+        "toolInvoked": "decompress"
+    }
+}
