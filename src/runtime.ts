@@ -10,6 +10,21 @@ import { resolveConfig, type AdapterConfig } from "./config.js";
 import { entriesToCoreMessages } from "./messages.js";
 import { SessionStateStore } from "./state.js";
 
+// pi exposes `sessionManager.buildContextEntries()`; omp (oh-my-pi) only has
+// `getBranch()`. Both return chronological SessionEntry[]; feature-detect so the
+// adapter runs under either host (omp's runner silently swallows the TypeError).
+type SessionEntrySource = {
+  buildContextEntries?: () => SessionEntry[];
+  getBranch?: () => SessionEntry[];
+};
+
+export function readContextEntries(sm: ExtensionContext["sessionManager"]): SessionEntry[] {
+  const source = sm as unknown as SessionEntrySource;
+  if (typeof source.buildContextEntries === "function") return source.buildContextEntries();
+  if (typeof source.getBranch === "function") return source.getBranch();
+  return [];
+}
+
 export interface AcpRuntime {
   core: CompressionCore;
   store: SessionStateStore;
@@ -67,7 +82,7 @@ export function createRuntime(adapter: AdapterConfig): AcpRuntime {
   async function stateFor(ctx: ExtensionContext) {
     const sm = ctx.sessionManager;
     const state = await store.load(sm.getSessionFile() ?? undefined, sm.getSessionId());
-    const entries = sm.buildContextEntries();
+    const entries = readContextEntries(sm);
     return { state, coreMessages: entriesToCoreMessages(entries), entries };
   }
 

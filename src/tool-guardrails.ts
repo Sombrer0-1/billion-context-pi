@@ -1,5 +1,4 @@
 import {
-  isBashToolResult,
   isToolCallEventType,
   type ExtensionAPI,
   type ToolResultEvent,
@@ -7,6 +6,14 @@ import {
 import { DEFAULT_TOOL_BASH_TIMEOUT, DEFAULT_TOOL_OUTPUT_MAX_BYTES } from "./config.js";
 import { debug } from "./log.js";
 import type { AcpRuntime } from "./runtime.js";
+
+// Vendored locally rather than imported: pi exports isBashToolResult, but omp's
+// compat bundle does not, and a missing named export fails the whole module at
+// load time under omp. The body is just e.toolName === "bash".
+export type BashToolResultEvent = Extract<ToolResultEvent, { toolName: "bash" }>;
+export function isBashToolResult(e: ToolResultEvent): e is BashToolResultEvent {
+  return e.toolName === "bash";
+}
 
 type ContentPart = ToolResultEvent["content"][number];
 

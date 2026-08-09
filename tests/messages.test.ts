@@ -200,6 +200,35 @@ test("entriesToCoreMessages still skips compaction and model_change", () => {
   assert.deepEqual(core.map((m) => m.id), ["a", "b"]);
 });
 
+test("entriesToCoreMessages preserves omp execution roles (bashExecution/pythonExecution) as user text instead of dropping them", () => {
+  const entries: SessionEntry[] = [
+    msgEntry("a", { role: "user", content: "run ls", timestamp: Date.now() }),
+    msgEntry("b", { role: "bashExecution", command: "ls -la", output: [{ type: "text", text: "file1\nfile2" }], exitCode: 0, timestamp: Date.now() } as object),
+    msgEntry("c", { role: "pythonExecution", command: "print('hi')", output: "hi", exitCode: 0, timestamp: Date.now() } as object),
+    msgEntry("d", { role: "assistant", content: [{ type: "text", text: "done" }], timestamp: Date.now() } as object),
+  ];
+  const core = entriesToCoreMessages(entries);
+  assert.deepEqual(core.map((m) => m.id), ["a", "b", "c", "d"], "no messages dropped");
+  const b = core[1]!;
+  assert.equal(b.role, "user");
+  assert.ok(b.text!.includes("$ ls -la"), "command rendered as $ command");
+  assert.ok(b.text!.includes("file1"), "output text preserved");
+  const c = core[2]!;
+  assert.equal(c.role, "user");
+  assert.ok(c.text!.includes("print('hi')"));
+  assert.ok(c.text!.includes("hi"));
+});
+
+test("entriesToCoreMessages prefers content over fallback fields when an omp role carries both", () => {
+  const entries: SessionEntry[] = [
+    msgEntry("a", { role: "bashExecution", content: [{ type: "text", text: "primary text" }], command: "should-not-appear", output: "neither", timestamp: Date.now() } as object),
+  ];
+  const core = entriesToCoreMessages(entries);
+  assert.equal(core.length, 1);
+  assert.equal(core[0]!.role, "user");
+  assert.equal(core[0]!.text, "primary text");
+});
+
 test("coreOutToAgentMessages patches the ref tag onto original messages", () => {
   const tag = acpRef("m00001") + "\n";
   const original = msgEntry("a", user("hello")).message;
