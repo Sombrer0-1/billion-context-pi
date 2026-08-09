@@ -75,14 +75,19 @@ tokens: countTokens(msg.text ?? "")
 新增 `src/density.ts`，维护实时密度系数 `density`：
 
 ```
-每轮 context 事件（推荐：累积锚点法，替代 EMA）：
-  Δreal = realTotal - anchorReal                     // provider 累计真实增量（同窗口）
-  Δest  = estTotal - anchorEst                        // 估算累计增量（同窗口）
-  if (Δest >= 50):                                   // 最小增量阈值，防微消息比值抖动
+每轮 context 事件：
+  if (postCompressionSkip):                     // 压缩后第一轮跳过（D7/F1）
+    postCompressionSkip = false
+    return
+  Δreal = realTotal - anchorReal                // provider 累计真实增量（同窗口）
+  Δest  = estTotal - anchorEst                  // 估算累计增量（同窗口）
+  if (Δest >= 50):                              // 最小增量阈值，防微消息比值抖动
     instantDensity = clamp(Δreal / Δest, 0.5, 2.5)
-    density = instantDensity                          // 全量比值，无 EMA 滞后
-    anchorReal = realTotal; anchorEst = estTotal      // 推进锚点
+    density = instantDensity                    // 全量比值，无 EMA 滞后
+    anchorReal = realTotal; anchorEst = estTotal // 推进锚点
 ```
+
+压缩触发时设置 `postCompressionSkip = true`（与 §5.1 的 flag 一致）。
 
 然后 `createCore({ countTokens: (text) => defaultCountTokens(text) × density })`。
 
@@ -186,6 +191,7 @@ tokens: countTokens(msg.text ?? "")
 - `computeProtectedRefs` 同样改用 countTokens（保护区 token 累计也应校准，否则 preserveRecentTokens 语义随密度漂移）
 - `recommendNode.run` 传 `ctx.countTokens` 给两处
 - 或者更简单：把 `estimateMessageTokens` 的实现直接改成 `countTokens` 语义（但它是模块级函数，无 ctx 访问权，需传参）
+- **更新测试断言**（F3）：acp-kernel 45 个测试中凡断言 pending/token 数值的用例，从 chars/4 口径改为 CJK-aware 口径（否则 Phase 1 PR 的 CI 会红灯）
 
 **adapter 改动（本仓库）**（⚠️ **依赖 Phase 1 已发布**：若 density 在 kernel chars/4 未修时上线，
 Δest 用 chars/4 低基线 → density ≈ 4.8 被 clamp 到 2.5 → 中文注入 2.5 tok/char 高估 2×。
@@ -198,11 +204,12 @@ tokens: countTokens(msg.text ?? "")
 
 ### 待确认问题（实现阶段）
 
-- [ ] 累积锚点法是否需要"连续 2 轮 ±20% 才采纳"加固？（防单轮异常冲击，评审建议可选）
-- [ ] `acp_status` breakdown 显示是否也要乘 density？（显示层一致性 vs 模型可读性）
-- [ ] 压缩块 summary 的 T2/T3 pending 是否也应该乘 density？（目前方案：不乘，CJK-aware 足够）
-- [ ] `computeProtectedRefs` 的 preserveRecentTokens 改用 countTokens 后，保护区大小变化是否影响行为？
-- [ ] density 按 `sessionId × modelId` 粒度存储，runtime 如何拿到 modelId？（ctx 是否暴露）
+- [x] **已决定**：累积锚点法采用"连续 2 轮 ±20% 才采纳"加固（C1 推荐实现，§3.2）
+- [x] **已决定**：`acp_status` breakdown **不乘** density——status 显示 kernel 口径（调试视角），
+      footer 已显示 provider 真实值，用户有对照
+- [x] **已决定**：T2/T3 pending **不乘** density——summary 短，CJK-aware 足够（§5.7）
+- [ ] `computeProtectedRefs` 的 preserveRecentTokens 改用 countTokens 后，保护区大小变化是否影响行为？（实现阶段验证）
+- [x] **已确认**：runtime 拿 modelId 用 `ctx.model.id`（`src/delegate-tool.ts:562`，完整标识符）
 
 ## 9. 问题溯源（哪些关键问题由用户提出）
 
@@ -252,3 +259,17 @@ density → Phase 3 显示层。完整评审见 `/tmp/token-calibration-review.m
   污染（≈4.8 被 clamp 到 2.5，中文高估 2×）
 - 建议项：§3.2 ±20% 连续 2 轮确认从可选升为推荐（C1）
 完整评审见 `/tmp/token-calibration-review-2.md`。
+
+### 第三轮终审（MiMo-V2.5-Pro，2026-08）
+
+结论：**有条件通过 → 修复 F1/F2 后方案冻结**。核心设计（双层校准 + 累积锚点法 +
+per-model 隔离）自洽且可实现。B1/B2/C1 补救到位；D1-D7 全部验证通过。
+终审发现 2 处文档内部矛盾（非设计缺陷），已修复：
+- **F1（高）** §3.2 算法规范缺 post-compression flag（与 §5.1/D7 描述不一致）→ 伪代码已加
+  `if (postCompressionSkip) skip` 逻辑
+- **F2（中）** §8 待确认列表与正文矛盾（±20% 推荐 vs 可选、T2/T3 定论 vs 待确认）→ 已对齐，
+  已决定项标注 [x]
+- 建议项：F3 kernel 测试断言同步更新（已入 §8 清单）
+额外确认：density 的 estTotal 来自 adapter `estimateTokens`（本就 CJK-aware），B2 的
+发布顺序约束是预防性保障而非运行时崩溃风险；F4/F5/F6 均验证无阻塞。
+完整评审见 `/tmp/token-calibration-review-3.md`。
