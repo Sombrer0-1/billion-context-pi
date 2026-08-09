@@ -73,7 +73,11 @@ function projectMessage(message: AgentMessage, id: string): CoreMessage[] {
         };
       });
     }
-    return [{ id, role: "assistant", contentType: "text", text: extractText(msg.content) }];
+    const text = extractText(msg.content);
+    // Drop thinking-only turns: empty assistant text makes OpenAI-compatible
+    // providers (e.g. GLM) return 400 (no body), which Pi misreads as overflow.
+    if (!text.trim()) return [];
+    return [{ id, role: "assistant", contentType: "text", text }];
   }
   const customText = extractText(msg.content) || fallbackText(msg);
   return customText.length > 0

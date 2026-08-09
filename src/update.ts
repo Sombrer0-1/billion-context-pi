@@ -3,7 +3,7 @@ import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { execFile } from "node:child_process";
 import { homedir } from "node:os";
-import { debug } from "./log.js";
+import { debug, logInfo, logWarn } from "./log.js";
 
 declare const CURRENT_VERSION: string;
 
@@ -138,32 +138,38 @@ export async function checkForUpdate(
       signal: AbortSignal.timeout(5000),
       headers: { Accept: "application/json" },
     });
-    if (!res.ok) return;
+    if (!res.ok) {
+      logWarn("update", { event: "check-http", status: res.status });
+      return;
+    }
     const data = (await res.json()) as { version?: string };
     const latest = data.version;
     if (!latest) return;
 
     const current = runtimeVersion ?? CURRENT_VERSION;
+    const hasUpdate = isNewer(latest, current);
     debug.event("update-check", {
       current,
       latest,
-      hasUpdate: isNewer(latest, current),
+      hasUpdate,
     });
+    logInfo("update", { event: "check", current, latest, hasUpdate });
 
-    if (isNewer(latest, current)) {
+    if (hasUpdate) {
       const installed = await autoInstallLatest(latest);
       if (installed && notify) {
         notify(
           `\x1b[32m\u2714 ACP auto-updated ${current} \u2192 ${latest}. Restart Pi to finish.\x1b[0m`,
         );
+        logInfo("update", { event: "auto-installed", from: current, to: latest });
       } else if (!installed && notify) {
         notify(
           `${PACKAGE_NAME} ${latest} available (you have ${current}). Run: pi update --extension npm:${PACKAGE_NAME}`,
         );
       }
     }
-  } catch {
-    // network error, registry down, timeout — silent
+  } catch (e) {
+    logWarn("update", { event: "check-error", error: e instanceof Error ? e.message : String(e) });
   } finally {
     updateInFlight = false;
   }

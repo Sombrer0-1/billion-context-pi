@@ -154,7 +154,7 @@ Create `~/.pi/acp.json` (global) and/or `<project>/.pi/acp.json` (project-local,
 
 | Key | Default | Description |
 |-----|---------|-------------|
-| `debug` | `false` | Write diagnostic events to `~/.pi/acp-debug.log`. Also enabled by env `ACP_DEBUG=1`. |
+| `debug` | `false` | Enable verbose **debug-level** events in the log. The always-on log (lifecycle events, errors, warnings) is written regardless; `debug` only adds extra diagnostics. Also enabled by env `ACP_DEBUG=1`. |
 | `autoUpdate` | `true` | On Pi startup, check npm for a newer version and auto-install it (throttled to one check per 3 minutes). Disable to avoid all startup network calls. |
 | `modelContextLimit` | *(auto)* | Override the context limit (in tokens). Defaults to the model's `contextWindow`. |
 | `delegate` | `true` | Enable the `acp_delegate` tools (delegate/wait/cancel) and their system-prompt section. Set `false` to skip registering them (e.g. you use a different sub-agent extension, or run headless where async injection adds no value). |
@@ -169,7 +169,22 @@ Create `~/.pi/acp.json` (global) and/or `<project>/.pi/acp.json` (project-local,
 |----------|--------|
 | `ACP_AUTO_UPDATE` | Set to `0` / `false` / `no` / `off` (case-insensitive) to disable auto-update, overriding the config. |
 | `ACP_MODEL_CONTEXT_LIMIT` | Override the context limit. Takes precedence over the config value. |
-| `ACP_DEBUG` | Set to `1` or `true` to enable debug logging. |
+| `ACP_DEBUG` | Set to `1` or `true` to enable debug-level logging (always-on events are written regardless). |
+| `ACP_LOG_FILE` | Override the log file path (default `~/.pi/acp.log`). |
+
+### Logging
+
+billion-context-pi writes a structured, always-on log to `~/.pi/acp.log` (override with `ACP_LOG_FILE`). It covers the model's whole working session and is useful for diagnosing problems:
+
+- **Always written** (even with `debug: false`): `error`, `warn`, `info` levels — session start, every context turn (token usage / nudge decision), compress/decompress, delegate spawn/done, and **all errors and warnings** (config/state/tool failures, delegate errors, guardrail caps, update failures). Error lines include the message and stack trace.
+- **Written only when `debug: true`**: verbose `debug`-level diagnostics (full field dumps, per-turn internals).
+
+Each line: `<ISO timestamp> [<level>] [<scope>] key=value key=value`. The file rotates to `~/.pi/acp.log.old` at 10 MB.
+
+```sh
+tail -f ~/.pi/acp.log                 # watch the session live
+grep '\[error\]' ~/.pi/acp.log        # surface every recorded failure
+```
 
 ### Compression philosophy
 
