@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { buildChildArgs } from "../src/delegate-tool.js";
+import { buildChildArgs, injectedWaitMessage } from "../src/delegate-tool.js";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 
 /** Minimal ctx mock - buildChildArgs only reads ctx.model. */
@@ -132,4 +132,38 @@ test("buildChildArgs uses explicit model override when provided", async () => {
   assert.equal(cliArgs[providerIdx + 1], "anthropic");
   assert.ok(modelIdx >= 0);
   assert.equal(cliArgs[modelIdx + 1], "claude-5");
+});
+
+// ─── wait() dedup: already-injected run returns "already delivered" ───────
+// Race scenario: the delegate finishes quickly, the close handler injects the
+// result as a system notification, and THEN the model calls acp_delegate_wait.
+// Without dedup the model sees the same result twice (notification + tool
+// result). injectedWaitMessage is the pure helper that short-circuits this.
+
+test("injectedWaitMessage returns null when run was NOT injected", () => {
+  assert.equal(injectedWaitMessage({ injected: false }, "del_x", ""), null);
+  assert.equal(injectedWaitMessage({}, "del_x", ""), null);
+});
+
+test("injectedWaitMessage dedup message names the runId and the result file", () => {
+  const msg = injectedWaitMessage(
+    { injected: true, result: { file: "/tmp/acp-delegate/del_x.out" } },
+    "del_x",
+    "",
+  );
+  assert.ok(msg, "returns a message for an injected run");
+  assert.ok(msg!.includes("del_x"), "names the runId");
+  assert.ok(msg!.includes("/tmp/acp-delegate/del_x.out"), "points at the result file");
+  assert.ok(msg!.includes("already delivered"), "states it was already delivered");
+  assert.ok(msg!.includes("no need to wait"), "tells the model not to wait again");
+});
+
+test("injectedWaitMessage surfaces remaining delegates and tolerates a missing file", () => {
+  const msg = injectedWaitMessage(
+    { injected: true, result: {} },
+    "del_x",
+    " 2 delegates are still running.",
+  );
+  assert.ok(msg!.includes("2 delegates are still running"), "passes through the remaining line");
+  assert.ok(!msg!.includes("read the result file"), "omits the file line when file is absent");
 });
