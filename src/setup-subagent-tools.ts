@@ -2,7 +2,7 @@ import { readFile, writeFile, stat, copyFile, rename } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { debug } from "./log.js";
+import { debug, logError, logWarn } from "./log.js";
 
 const ACP_TOOLS = ["compress", "decompress", "search_context", "acp_status"] as const;
 
@@ -141,9 +141,13 @@ export async function runSetupAndNotify(notify?: (msg: string) => void): Promise
     if (result.action === "updated" && notify) {
       notify(`ACP: enabled context tools (compress/decompress/search_context/acp_status) for subagents`);
     }
+    if (result.action === "failed") {
+      logWarn("setup", { event: "subagent-tools", action: result.action, reason: result.reason });
+    }
     return result;
   } catch (e) {
     debug.event("setup-subagent-tools-error", { msg: String(e) });
+    logError("setup", { event: "subagent-tools-error", error: e instanceof Error ? e.message : String(e), stack: e instanceof Error ? e.stack ?? "" : "" });
     return { path: "", action: "failed", reason: String(e) };
   }
 }

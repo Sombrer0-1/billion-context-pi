@@ -4,7 +4,7 @@ import {
   type ToolResultEvent,
 } from "@earendil-works/pi-coding-agent";
 import { DEFAULT_TOOL_BASH_TIMEOUT, DEFAULT_TOOL_OUTPUT_MAX_BYTES } from "./config.js";
-import { debug } from "./log.js";
+import { debug, logInfo, logWarn } from "./log.js";
 import type { AcpRuntime } from "./runtime.js";
 
 // Vendored locally rather than imported: pi exports isBashToolResult, but omp's
@@ -132,12 +132,14 @@ export function wireToolGuardrails(pi: ExtensionAPI, runtime: AcpRuntime): void 
       if (next) {
         modified = next;
         debug.event("guardrail-output-cap", { max, hadPath: !!fullPath });
+        logWarn("guardrail", { event: "output-cap", max, hadPath: !!fullPath });
       }
     }
 
     if (timeoutSecs !== undefined) {
       modified = appendTimeoutNotice(modified ?? event.content, timeoutSecs);
       debug.event("guardrail-bash-timeout-notice", { secs: timeoutSecs });
+      logInfo("guardrail", { event: "bash-timeout-notice", secs: timeoutSecs });
     }
 
     if (modified) return { content: modified };
