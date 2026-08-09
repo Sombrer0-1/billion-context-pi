@@ -1,15 +1,14 @@
 import type { ExtensionContext, SessionEntry } from "@earendil-works/pi-coding-agent";
 import {
   createCore,
-  defaultCountTokens,
   type CompressionCore,
   type CompressionState,
   type Config,
 } from "acp-kernel";
 import { resolveConfig, type AdapterConfig } from "./config.js";
+import { DensityEstimator } from "./density.js";
 import { entriesToCoreMessages } from "./messages.js";
 import { SessionStateStore } from "./state.js";
-
 // pi exposes `sessionManager.buildContextEntries()`; omp (oh-my-pi) only has
 // `getBranch()`. Both return chronological SessionEntry[]; feature-detect so the
 // adapter runs under either host (omp's runner silently swallows the TypeError).
@@ -28,6 +27,9 @@ export function readContextEntries(sm: ExtensionContext["sessionManager"]): Sess
 export interface AcpRuntime {
   core: CompressionCore;
   store: SessionStateStore;
+  density: DensityEstimator;
+  /** 设置 countTokens 闭包使用的 modelId（每轮 context 事件调用）。 */
+  setCountModel(modelId: string): void;
   adapter: AdapterConfig;
   setAdapter(adapter: AdapterConfig): void;
   /** Record that a nudge was already shown for the turn keyed by last user msg
@@ -44,9 +46,13 @@ export interface AcpRuntime {
   save(state: CompressionState, ctx: ExtensionContext): Promise<void>;
   acquireLock(sid: string): Promise<() => void>;
 }
-
 export function createRuntime(adapter: AdapterConfig): AcpRuntime {
-  const core = createCore({ countTokens: defaultCountTokens });
+  const density = new DensityEstimator();
+  let countModelId = "default";
+  const core = createCore({
+    // 密度校准版 countTokens（Phase 2）：默认回落 defaultCountTokens（density=1）
+    countTokens: (text) => density.estimateWithDensity(countModelId, text),
+  });
   const store = new SessionStateStore();
   const locks = new Map<string, Promise<void>>();
   let adapterRef = adapter;
@@ -91,5 +97,5 @@ export function createRuntime(adapter: AdapterConfig): AcpRuntime {
     await store.save(state, sm.getSessionFile() ?? undefined, sm.getSessionId());
   }
 
-  return { core, store, get adapter() { return adapterRef; }, setAdapter: (a) => { adapterRef = a; }, markNudgeShown: (k) => { nudgeShownTurns.add(k); }, nudgeShownFor: (k) => nudgeShownTurns.has(k), clearNudgeTracking: () => { nudgeShownTurns.clear(); }, liveContextLimit, configFor, stateFor, save, acquireLock };
+  return { core, store, density, setCountModel: (m) => { countModelId = m; }, get adapter() { return adapterRef; }, setAdapter: (a) => { adapterRef = a; }, markNudgeShown: (k) => { nudgeShownTurns.add(k); }, nudgeShownFor: (k) => nudgeShownTurns.has(k), clearNudgeTracking: () => { nudgeShownTurns.clear(); }, liveContextLimit, configFor, stateFor, save, acquireLock };
 }

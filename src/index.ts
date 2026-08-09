@@ -60,6 +60,9 @@ function wireSessionLifecycle(pi: ExtensionAPI, runtime: AcpRuntime): void {
   pi.on("session_start", async (_event, ctx) => {
     runtime.store.invalidate();
     runtime.clearNudgeTracking();
+    // 新会话重置该模型的密度校准（文档 §5.3：模型/窗口切换时重新收敛）
+    const modelId = (ctx.model as { id?: string } | undefined)?.id ?? "default";
+    runtime.density.resetModel(modelId);
     // Load user config (~/.pi/acp.json + project .pi/acp.json) and apply it so
     // debug/terminalNudge/autoUpdate/modelContextLimit are runtime-configurable
     // without env vars or reinstalling.
@@ -101,6 +104,9 @@ function wireContextTransform(pi: ExtensionAPI, runtime: AcpRuntime): void {
     const sid = ctx.sessionManager.getSessionId();
     const release = await runtime.acquireLock(sid);
     try {
+      // 每轮绑定 countTokens 使用的模型（密度校准按 model 隔离）
+      const modelId = (ctx.model as { id?: string } | undefined)?.id ?? "default";
+      runtime.setCountModel(modelId);
       const { state, coreMessages, entries } = await runtime.stateFor(ctx);
       const config = runtime.configFor(ctx);
       const coveredIds = collectCoveredMessageIds(state);
@@ -129,7 +135,12 @@ function wireContextTransform(pi: ExtensionAPI, runtime: AcpRuntime): void {
 
       const turn = runtime.core.processTurn({ messages: coreMessages, state, config, tokenCount });
       await runtime.save(turn.state, ctx);
-
+      // 更新密度校准（Phase 2）：processTurn 后调用，countTokens 用上一轮 density（1 轮延迟可忽略）。
+      // postCompression = 本次新增了 active block（模型刚压缩过）。
+      const postCompression = turn.state.blocks.some(
+        (b) => b.active && !state.blocks.some((o) => o.blockId === b.blockId)
+      );
+      runtime.density.update(modelId, realUsage?.tokens ?? null, estimated, postCompression);
       debug.event("processTurn", {
         outMsgs: turn.messages.length,
         summaryMsgs: turn.messages.filter((m) => m.id.startsWith("acp_summary")).length,
