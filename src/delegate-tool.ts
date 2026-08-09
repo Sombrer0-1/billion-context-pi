@@ -14,6 +14,7 @@ import type {
   ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
 import { debug } from "./log.js";
+import { attachWatchdogs } from "./delegate-watchdog.js";
 
 const MAX_DEPTH = 2;
 const SYNC_TIMEOUT_MS = 5 * 60_000;
@@ -431,9 +432,27 @@ async function runDelegate(
   const startedAt = Date.now();
 
   if (isAsync) {
+    let settled = false;
+    // Watchdogs: idle (no output), EOF grace, hard limit. A stuck child holds
+    // its stdout fd open so stdout EOF never fires — idle is the main defense.
+    const watchdog = attachWatchdogs(
+      child,
+      {
+        isSettled: () => settled || run.status !== "running",
+        onKill: (reason) => {
+          run.timedOut = reason;
+          debug.event("delegate-watchdog", { runId, reason });
+        },
+        onEofGrace: () => {
+          run.timedOut = "output ended but process did not exit";
+          debug.event("delegate-eof-grace", { runId, ms: EOF_GRACE_MS });
+        },
+      },
+      { eofGraceMs: EOF_GRACE_MS, idleMs: IDLE_GRACE_MS, timeoutMs: ASYNC_TIMEOUT_MS, killGraceMs: KILL_GRACE_MS },
+    );
     child.stdout?.on("data", (c: Buffer) => {
       stdoutChunks.push(c);
-      resetIdle();
+      watchdog.poke();
     });
     child.stderr?.on("data", (c: Buffer) => {
       stderrText += c.toString("utf8");
@@ -450,50 +469,11 @@ async function runDelegate(
     runs.set(runId, run);
     delegateStatusWidget.poke();
 
-    // ── Watchdogs + single finalize path ──────────────────────────────────
-    // Finalize is the ONLY place that flips run status/result. It is shared by
-    // the child close event and the EOF watchdog, with `settled` guarding
-    // against double-finalize (watchdog fires, then the killed child's close
-    // event arrives).
-    let settled = false;
-    let eofGraceTimer: ReturnType<typeof setTimeout> | undefined;
-    let idleTimer: ReturnType<typeof setTimeout> | undefined;
-    let killGraceTimer: ReturnType<typeof setTimeout> | undefined;
-    let timeoutTimer: ReturnType<typeof setTimeout> | undefined;
-    const clearWatchdogs = (): void => {
-      if (eofGraceTimer) clearTimeout(eofGraceTimer);
-      if (idleTimer) clearTimeout(idleTimer);
-      if (killGraceTimer) clearTimeout(killGraceTimer);
-      if (timeoutTimer) clearTimeout(timeoutTimer);
-    };
-    // Reset the idle watchdog whenever the delegate produces output. A hanging
-    // child holds its stdout fd open (so stdout EOF never fires) — no output
-    // for IDLE_GRACE_MS is the reliable "stuck" signal.
-    const resetIdle = (): void => {
-      if (idleTimer) clearTimeout(idleTimer);
-      idleTimer = setTimeout(() => killByWatchdog(`no output for ${IDLE_GRACE_MS / 60_000}m`), IDLE_GRACE_MS);
-      idleTimer.unref?.();
-    };
-    // SIGTERM, then SIGKILL after KILL_GRACE_MS if the child ignores it. The
-    // close event that follows funnels into finalize() with the code it got.
-    const killByWatchdog = (reason: string): void => {
-      if (settled || run.status !== "running") return;
-      run.timedOut = reason;
-      debug.event("delegate-watchdog", { runId, reason });
-      try { run.child?.kill("SIGTERM"); } catch { /* best-effort */ }
-      killGraceTimer = setTimeout(() => {
-        if (settled || run.status !== "running") return;
-        debug.event("delegate-watchdog-kill", { runId, reason });
-        try { run.child?.kill("SIGKILL"); } catch { /* best-effort */ }
-      }, KILL_GRACE_MS);
-      killGraceTimer.unref?.();
-    };
-
     const finalize = (code: number | null): void => {
       void (async () => {
         if (settled) return;
         settled = true;
-        clearWatchdogs();
+        watchdog.dispose();
         void cleanupTmp(tmpDir);
         const output = Buffer.concat(stdoutChunks).toString("utf8").trim();
         run.exitCode = code;
@@ -550,32 +530,11 @@ async function runDelegate(
 
     child.on("close", (code) => finalize(code));
 
-    child.stdout?.on("end", () => {
-      // stdout EOF: the delegate's output is fully delivered, but the process
-      // may still hang (e.g. a provider call that never responds). Give it a
-      // short grace period to exit naturally; if it does not, force-finalize —
-      // the output is already complete, so the result is final.
-      eofGraceTimer = setTimeout(() => {
-        if (settled || run.status !== "running") return;
-        run.timedOut = "output ended but process did not exit";
-        debug.event("delegate-eof-grace", { runId, ms: EOF_GRACE_MS });
-        try { run.child?.kill("SIGTERM"); } catch { /* best-effort */ }
-        finalize(null);
-      }, EOF_GRACE_MS);
-      eofGraceTimer.unref?.();
-    });
-
-    // Start the idle clock and the overall runtime budget. The budget also
-    // covers the pathological case where a child neither outputs nor exits
-    // AND somehow evades the idle timer (e.g. stderr-only chatter).
-    resetIdle();
-    timeoutTimer = setTimeout(() => killByWatchdog(`${ASYNC_TIMEOUT_MS / 60_000}m limit`), ASYNC_TIMEOUT_MS);
-    timeoutTimer.unref?.();
 
     child.on("error", (err) => {
       if (settled) return;
       settled = true;
-      clearWatchdogs();
+      watchdog.dispose();
       void cleanupTmp(tmpDir);
       // Spawn-level error (e.g. EPIPE on a fast-exiting child, ENOENT).
       // Node does not guarantee a follow-up close, so finalize here too:
