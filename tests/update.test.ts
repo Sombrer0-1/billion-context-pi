@@ -1,6 +1,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { checkForUpdate } from "../src/update.js";
+import { join } from "node:path";
+import { homedir } from "node:os";
+import { checkForUpdate, findNpmRoot } from "../src/update.js";
 
 // Opt-out must short-circuit BEFORE any network/filesystem touch. We assert this
 // by making global fetch throw if it is ever reached.
@@ -34,4 +36,13 @@ test("checkForUpdate trims surrounding whitespace in ACP_AUTO_UPDATE before matc
     await withFetchGuard(() => checkForUpdate(true));
   }
   delete process.env.ACP_AUTO_UPDATE;
+});
+
+test("findNpmRoot locates the package root when nested under node_modules", () => {
+  const ext = join(homedir(), "x", "node_modules", "billion-context-pi");
+  assert.equal(findNpmRoot(ext), join(homedir(), "x"));
+});
+
+test("findNpmRoot terminates when no node_modules ancestor exists (no Windows infinite loop)", { timeout: 2000 }, () => {
+  assert.equal(findNpmRoot(homedir()), undefined);
 });
