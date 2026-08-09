@@ -121,6 +121,8 @@ function wireContextTransform(pi: ExtensionAPI, runtime: AcpRuntime): void {
 
       debug.event("context-in", {
         sid,
+        modelId,
+        density: runtime.density.densityFor(modelId),
         eventMsgs: event.messages?.length ?? 0,
         entries: entries.length,
         coreMsgs: coreMessages.length,
@@ -142,6 +144,8 @@ function wireContextTransform(pi: ExtensionAPI, runtime: AcpRuntime): void {
       );
       runtime.density.update(modelId, realUsage?.tokens ?? null, estimated, postCompression);
       debug.event("processTurn", {
+        modelId,
+        density: runtime.density.densityFor(modelId),
         outMsgs: turn.messages.length,
         summaryMsgs: turn.messages.filter((m) => m.id.startsWith("acp_summary")).length,
         prunedMsgs: coreMessages.length - turn.messages.length + turn.messages.filter((m) => m.id.startsWith("acp_summary")).length,
