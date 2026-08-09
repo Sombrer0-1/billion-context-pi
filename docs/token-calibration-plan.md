@@ -98,7 +98,6 @@ tokens: countTokens(msg.text ?? "")
 无滞后、无 α 参数。**推荐加固**（评审 C1）：连续 2 轮比值在 ±20% 内才采纳
 （一个 pendingDensity + 确认计数器，成本极低），防单轮异常污染锚点；不影响
 收敛速度（正常情况 2 轮确认 = 1 轮延迟）。
-然后 `createCore({ countTokens: (text) => defaultCountTokens(text) × density })`。
 
 **为什么用相邻差值而非绝对比值**：provider 总量含 ~24K system+schema 固定开销，
 直接除会污染系数；相邻两轮差值自动消掉固定开销，得到纯"消息真实 token / 估算 token"密度。
@@ -273,3 +272,12 @@ per-model 隔离）自洽且可实现。B1/B2/C1 补救到位；D1-D7 全部验�
 额外确认：density 的 estTotal 来自 adapter `estimateTokens`（本就 CJK-aware），B2 的
 发布顺序约束是预防性保障而非运行时崩溃风险；F4/F5/F6 均验证无阻塞。
 完整评审见 `/tmp/token-calibration-review-3.md`。
+
+### 第四轮终审复核（MiMo-V2.5-Pro，2026-08）
+
+结论：**✅ 方案正式冻结，Phase 1 可启动**。
+- F1（postCompressionSkip flag 入算法规范）✅ 通过——伪代码第 2 行检查、置位/复位时机正确
+- F2（§8 与正文对齐）✅ 通过——无残留矛盾，唯一开放项合理标记为实现阶段验证
+- F3（测试断言更新说明）✅ 通过——可执行
+- 仅 1 个小瑕疵 G1（§3.2 重复行）已清理；文档可直接作为实现规格书
+完整评审见 `/tmp/token-calibration-review-4.md`。
