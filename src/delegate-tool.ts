@@ -94,6 +94,10 @@ interface DelegateRun {
   child?: ChildProcess;
   result?: { code: number | null; file: string; body: string };
   consumed?: boolean;
+  /** True once the close handler injected the result as a system
+   *  notification (sendUserMessage succeeded). Lets a later wait() avoid
+   *  re-delivering the same payload. */
+  injected?: boolean;
   waiter?: () => void;
 }
 
@@ -206,6 +210,23 @@ function remainingLineForWait(selfRunId: string): string {
   return remaining > 0 ? ` ${remaining} delegate${remaining === 1 ? " is" : "s are"} still running.` : "";
 }
 
+/** If the delegate already delivered its result via a system notification
+ *  (the close handler injected before this wait was called), return a short
+ *  "already delivered" message pointing at the result file, so the model
+ *  never sees the same result twice (once via the injected notification,
+ *  once via this tool result). Returns null when the run was NOT injected,
+ *  in which case the caller delivers the full payload via formatRunResult(). */
+export function injectedWaitMessage(
+  run: { injected?: boolean; result?: { file: string } },
+  runId: string,
+  remainingLine: string,
+): string | null {
+  if (!run.injected) return null;
+  const file = run.result?.file;
+  const fileLine = file ? ` If you need details, read the result file: \`${file}\`.` : "";
+  return `Delegate \`${runId}\` already delivered its result via a system notification when it finished — no need to wait on it again.${remainingLine}${fileLine}`;
+}
+
 export function makeDelegateWaitTool(_pi: ExtensionAPI): ToolDefinition<typeof WaitParams> {
   return {
     name: "acp_delegate_wait",
@@ -231,6 +252,15 @@ export function makeDelegateWaitTool(_pi: ExtensionAPI): ToolDefinition<typeof W
         return { details: undefined, content: [{ type: "text", text: `Delegate \`${args.runId}\` was cancelled (no result).${remainingLineForWait(args.runId)}` }] };
       }
       if (run.status !== "running") {
+        // The delegate already finished. If the close handler already injected
+        // its result as a system notification (it fired before this wait was
+        // called), don't re-deliver the full payload — point at the file
+        // instead, so the model never sees the same result twice.
+        const dedup = injectedWaitMessage(run, args.runId, remainingLineForWait(args.runId));
+        if (dedup) {
+          run.consumed = true;
+          return { details: undefined, content: [{ type: "text", text: dedup }] };
+        }
         // status is only flipped together with result (see close handler), so
         // a non-running, non-cancelled run always has a result. Guard anyway.
         run.consumed = true;
@@ -447,6 +477,7 @@ async function runDelegate(
             return;
           }
           const injected = injectResult(pi, args.agent, runId, args.task, code, file);
+          run.injected = injected;
           debug.event("delegate-done", { runId, code, status: run.status, injected, outLen: output.length, file });
           delegateStatusWidget.poke();
         })
