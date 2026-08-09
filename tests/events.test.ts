@@ -94,3 +94,36 @@ test("ThinkingCollector merges deltas into one line per segment", () => {
   off.push("hidden ");
   assert.equal(off.flush(), "", "disabled collector emits nothing");
 });
+
+test("parses auto_retry_start and auto_retry_end", () => {
+  const start = parseEventLine('{"type":"auto_retry_start","attempt":1,"maxAttempts":3,"delayMs":2000,"errorMessage":"529 {\\"error\\":{\\"type\\":\\"overloaded_error\\"}}"}');
+  assert.deepEqual(start, {
+    kind: "retry-start",
+    attempt: 1,
+    maxAttempts: 3,
+    delayMs: 2000,
+    errorMessage: '529 {"error":{"type":"overloaded_error"}}',
+  });
+
+  const end = parseEventLine('{"type":"auto_retry_end","success":true,"attempt":2}');
+  assert.deepEqual(end, { kind: "retry-end", success: true, attempt: 2 });
+});
+
+test("activityLines formats retry events", () => {
+  assert.deepEqual(
+    activityLines({ kind: "retry-start", attempt: 1, maxAttempts: 3, delayMs: 2000, errorMessage: "529 overloaded" }, { showThinking: false }),
+    ["[retry] attempt 1/3, backoff 2000ms — 529 overloaded\n"],
+  );
+  assert.deepEqual(
+    activityLines({ kind: "retry-start", attempt: 2, maxAttempts: 3, delayMs: 5000, errorMessage: "" }, { showThinking: false }),
+    ["[retry] attempt 2/3, backoff 5000ms\n"],
+  );
+  assert.deepEqual(
+    activityLines({ kind: "retry-end", success: true, attempt: 2 }, { showThinking: false }),
+    ["[retry] attempt 2 succeeded\n"],
+  );
+  assert.deepEqual(
+    activityLines({ kind: "retry-end", success: false, attempt: 3 }, { showThinking: false }),
+    ["[retry] attempt 3 failed\n"],
+  );
+});

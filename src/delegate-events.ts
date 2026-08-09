@@ -43,7 +43,9 @@ export type ParsedEvent =
   | ReplyDeltaEvent
   | ReplyCompleteEvent
   | ThinkingDeltaEvent
-  | ThinkingEndEvent;
+  | ThinkingEndEvent
+  | RetryStartEvent
+  | RetryEndEvent;
 
 export interface ThinkingEndEvent {
   kind: "thinking-end";
@@ -71,7 +73,21 @@ export class ThinkingCollector {
     return `[thinking] ${text}\n`;
   }
 }
-/** Parse one newline-delimited JSON line; null for non-JSON or irrelevant events. */
+
+export interface RetryStartEvent {
+  kind: "retry-start";
+  attempt: number;
+  maxAttempts: number;
+  delayMs: number;
+  errorMessage: string;
+}
+
+export interface RetryEndEvent {
+  kind: "retry-end";
+  success: boolean;
+  attempt: number;
+}
+
 export function parseEventLine(line: string): ParsedEvent | null {
   let ev: unknown;
   try {
@@ -119,6 +135,22 @@ export function parseEventLine(line: string): ParsedEvent | null {
       isError: Boolean(e.isError),
     };
   }
+  if (e.type === "auto_retry_start") {
+    return {
+      kind: "retry-start",
+      attempt: Number(e.attempt ?? 0),
+      maxAttempts: Number(e.maxAttempts ?? 0),
+      delayMs: Number(e.delayMs ?? 0),
+      errorMessage: String(e.errorMessage ?? ""),
+    };
+  }
+  if (e.type === "auto_retry_end") {
+    return {
+      kind: "retry-end",
+      success: Boolean(e.success),
+      attempt: Number(e.attempt ?? 0),
+    };
+  }
   return null;
 }
 
@@ -159,6 +191,10 @@ export function activityLines(ev: ParsedEvent, opts: { showThinking: boolean }):
       return [`[done] ${ev.toolName}${ev.isError ? " (error)" : ""}\n`];
     case "thinking-delta":
       return opts.showThinking ? [`[thinking] ${ev.delta}\n`] : [];
+    case "retry-start":
+      return [`[retry] attempt ${ev.attempt}/${ev.maxAttempts}, backoff ${ev.delayMs}ms${ev.errorMessage ? ` — ${ev.errorMessage}` : ""}\n`];
+    case "retry-end":
+      return [`[retry] attempt ${ev.attempt} ${ev.success ? "succeeded" : "failed"}\n`];
     default:
       return [];
   }
