@@ -77,6 +77,54 @@ test("entriesToCoreMessages projects user/assistant/toolResult roles and extract
   assert.equal(core[3]!.text, "file contents");
 });
 
+function assistantThinkingOnly(thinking: string): object {
+  return { role: "assistant", content: [{ type: "thinking", thinking }], timestamp: Date.now() };
+}
+function assistantThinkingAndText(thinking: string, text: string): object {
+  return {
+    role: "assistant",
+    content: [{ type: "thinking", thinking }, { type: "text", text }],
+    timestamp: Date.now(),
+  };
+}
+
+test("entriesToCoreMessages drops thinking-only assistant turns (no empty assistant text → no provider 400)", () => {
+  const entries: SessionEntry[] = [
+    msgEntry("a", user("before")),
+    msgEntry("b", assistantThinkingOnly("internal reasoning, no output") as object),
+    msgEntry("c", user("after")),
+  ];
+  const core = entriesToCoreMessages(entries);
+
+  assert.deepEqual(core.map((m) => m.id), ["a", "c"], "thinking-only assistant dropped, not emitted as empty text");
+  assert.ok(
+    !core.some((m) => m.role === "assistant" && (!m.text || !m.text.trim())),
+    "no empty-text assistant message in output",
+  );
+});
+
+test("entriesToCoreMessages keeps assistant turn that has thinking AND text (text extracted, thinking ignored)", () => {
+  const entries: SessionEntry[] = [
+    msgEntry("a", assistantThinkingAndText("private reasoning", "visible answer") as object),
+  ];
+  const core = entriesToCoreMessages(entries);
+
+  assert.equal(core.length, 1);
+  assert.equal(core[0]!.role, "assistant");
+  assert.equal(core[0]!.contentType, "text");
+  assert.equal(core[0]!.text, "visible answer", "text kept, thinking block not inlined");
+});
+
+test("entriesToCoreMessages drops assistant turn whose text is whitespace-only", () => {
+  const entries: SessionEntry[] = [
+    msgEntry("a", user("before")),
+    msgEntry("b", { role: "assistant", content: [{ type: "text", text: "   \n  " }], timestamp: Date.now() } as object),
+    msgEntry("c", user("after")),
+  ];
+  const core = entriesToCoreMessages(entries);
+  assert.deepEqual(core.map((m) => m.id), ["a", "c"], "whitespace-only assistant dropped");
+});
+
 function customEntry(id: string, customType: string, content: string | unknown[]): SessionEntry {
   return {
     type: "custom_message",
