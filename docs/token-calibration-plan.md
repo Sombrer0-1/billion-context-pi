@@ -90,8 +90,9 @@ tokens: countTokens(msg.text ?? "")
 （如中文 1.6 → 英文 0.8）后需 ~20 轮才收敛，期间持续高估 pending；且 Δreal/Δest
 存在 off-by-one 时间错位（realUsage 是上一轮 provider 返回值，estimate 是本轮），
 工具密集轮会产生虚假尖峰。累积锚点法取同一时间窗口的累计增量，天然对齐、
-无滞后、无 α 参数。**可选加固**：连续 2 轮比值在 ±20% 内才采纳，防单轮异常冲击。
-
+无滞后、无 α 参数。**推荐加固**（评审 C1）：连续 2 轮比值在 ±20% 内才采纳
+（一个 pendingDensity + 确认计数器，成本极低），防单轮异常污染锚点；不影响
+收敛速度（正常情况 2 轮确认 = 1 轮延迟）。
 然后 `createCore({ countTokens: (text) => defaultCountTokens(text) × density })`。
 
 **为什么用相邻差值而非绝对比值**：provider 总量含 ~24K system+schema 固定开销，
@@ -136,7 +137,11 @@ tokens: countTokens(msg.text ?? "")
    即使 CJK+emoji 混合也不超过 2.5；下界 0.5 给纯英文留余量（评审 D3）
 6. **最小 Δest 阈值 = 50** → 微消息（1-2 字符）的比值极不稳定（评审 D4）
 7. **T2/T3 不受影响** → summary 本身短，CJK-aware 已足够
-
+8. **密度不持久化（已知行为）** → density 存内存 Map，Pi 重启后回 1；冷启动
+   第 1 轮低估 ~40%，2-3 轮后自动收敛（评审 B1）。不做持久化：收敛快、
+   `*.acp.json` 格式改动需向后兼容、冷启动不差于现状（chars/4 本就是当前行为）
+9. **provider 连续缺失 realUsage** → 锚点冻结，恢复后累积窗口自动拉长，分子分母
+   同比例，比值仍正确。无需"超时重置"逻辑（评审 A1）
 ## 6. 验证方式
 
 1. 单测：构造中英混合消息，断言 pending = countTokens 口径而非 chars/4
@@ -182,7 +187,9 @@ tokens: countTokens(msg.text ?? "")
 - `recommendNode.run` 传 `ctx.countTokens` 给两处
 - 或者更简单：把 `estimateMessageTokens` 的实现直接改成 `countTokens` 语义（但它是模块级函数，无 ctx 访问权，需传参）
 
-**adapter 改动（本仓库）**：
+**adapter 改动（本仓库）**（⚠️ **依赖 Phase 1 已发布**：若 density 在 kernel chars/4 未修时上线，
+Δest 用 chars/4 低基线 → density ≈ 4.8 被 clamp 到 2.5 → 中文注入 2.5 tok/char 高估 2×。
+必须 kernel 先发版，Δest 才是 CJK-aware 口径，density 才收敛到 ~1.2 的正确值。评审 B2）：
 - 新建 `src/density.ts`：累积锚点密度估计器（Δreal/Δest 同窗口、clamp [0.5,2.5]、
   最小 Δest=50 门槛、压缩后跳过一轮、per-model Map 存储、模型切换重置）
 - `src/runtime.ts`：`createCore({ countTokens: (t) => defaultCountTokens(t) × density })`
@@ -235,3 +242,13 @@ tokens: countTokens(msg.text ?? "")
 CJK-aware countTokens 就解决 80% 问题（0.25 → 1.0 tok/char，改善 4 倍），零风险可独立
 PR；density 系数只是校准残余 ~20% 误差。实施顺序：Phase 1 kernel → Phase 2 adapter
 density → Phase 3 显示层。完整评审见 `/tmp/token-calibration-review.md`。
+
+### 第二轮评审（MiMo-V2.5-Pro，2026-08）
+
+结论：**可进入实现阶段**。D1-D7 修订全部到位；`ctx.model.id` 确认可拿模型标识
+（`src/delegate-tool.ts:562`）；新增 2 项补救（已纳入 §5/§8）：
+- **B1（高）** 密度不持久化，重启回 1 → §5.8 声明为已知行为（收敛 2-3 轮，不做持久化）
+- **B2（中）** Phase 2 依赖 Phase 1 先行 → §8 标注：chars/4 未修时 density 会被低基线
+  污染（≈4.8 被 clamp 到 2.5，中文高估 2×）
+- 建议项：§3.2 ±20% 连续 2 轮确认从可选升为推荐（C1）
+完整评审见 `/tmp/token-calibration-review-2.md`。
