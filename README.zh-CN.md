@@ -153,7 +153,7 @@ billion-context-pi 开箱即用,无需任何配置。可以在 JSON 配置文件
 
 | Key | 默认值 | 说明 |
 |-----|--------|------|
-| `debug` | `false` | 将诊断事件写入 `~/.pi/acp-debug.log`。也可用环境变量 `ACP_DEBUG=1` 启用。 |
+| `debug` | `false` | 启用诊断日志(`error`/`warn`/`info` 始终写入 `~/.pi/acp.log`,此开关仅额外打开详细 `debug` 事件)。也可用环境变量 `ACP_DEBUG=1` 启用。 |
 | `autoUpdate` | `true` | Pi 启动时检查 npm 是否有更新版本并自动安装(限频:每 3 分钟最多一次检查)。禁用以避免所有启动时的网络请求。 |
 | `modelContextLimit` | *(自动)* | 覆盖上下文上限(token 数)。默认为模型的 `contextWindow`。 |
 | `delegate` | `true` | 启用 `acp_delegate` 工具(delegate/wait/cancel)及其系统提示词段落。设为 `false` 则不注册这些工具(例如你用了别的子代理扩展,或跑 headless 场景异步注入没有意义)。 |
@@ -168,7 +168,24 @@ billion-context-pi 开箱即用,无需任何配置。可以在 JSON 配置文件
 |------|------|
 | `ACP_AUTO_UPDATE` | 设为 `0` / `false` / `no` / `off`(不区分大小写)以禁用自动更新,覆盖配置值。 |
 | `ACP_MODEL_CONTEXT_LIMIT` | 覆盖上下文上限。优先级高于配置值。 |
-| `ACP_DEBUG` | 设为 `1` 或 `true` 启用 debug 日志。 |
+| `ACP_DEBUG` | 设为 `1` 或 `true` 启用 debug 日志(`error`/`warn`/`info` 始终写入,无需此开关)。 |
+| `ACP_LOG_FILE` | 覆盖日志文件路径(默认 `~/.pi/acp.log`)。 |
+
+### 日志
+
+billion-context-pi 会向 `~/.pi/acp.log`(可用 `ACP_LOG_FILE` 覆盖)写入结构化的**始终开启**日志,覆盖模型工作的整个会话,便于排查问题:
+
+- `error` — 详细记录所有报错(含 `message` 与 `stack`):上下文变换、压缩/解压/搜索执行失败、delegate 子进程错误、状态读写失败、子代理工具注册失败等。原本被静默吞掉的异常现在一律落盘。
+- `warn` — 值得注意的非致命情况:紧急 nudge 注入、配置加载失败、自动更新网络错误、工具输出被截断、委派结果注入被跳过。
+- `info` — 生命周期事件:会话启动、每轮上下文变换摘要(消息数/token/压缩比/活跃块数)、压缩/解压、delegate 派发与完成、自动更新检查。
+- `debug` —— 仅在 `debug: true` 时额外写入(细粒度的字段级事件)。
+
+每行格式:`<ISO 时间戳> [<级别>] [<范围>] key=value key=value`。文件达到 10 MB 时轮转为 `~/.pi/acp.log.old`。
+
+```bash
+tail -f ~/.pi/acp.log                 # 实时观察会话
+grep '\[error\]' ~/.pi/acp.log        # 汇总所有记录的失败
+```
 
 ### 压缩策略
 
