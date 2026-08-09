@@ -3,7 +3,7 @@ import * as path from "node:path";
 import { homedir } from "node:os";
 import { CONFIG_DIR_NAME } from "@earendil-works/pi-coding-agent";
 import type { AdapterConfig } from "./config.js";
-import { debug } from "./log.js";
+import { debug, logWarn } from "./log.js";
 
 /** User-facing config keys (subset of AdapterConfig). Loaded from
  *  ~/.<CONFIG_DIR_NAME>/acp.json (global) and <cwd>/.<CONFIG_DIR_NAME>/acp.json
@@ -31,8 +31,11 @@ export async function loadUserConfig(cwd: string): Promise<UserAcpConfig> {
         Object.assign(merged, pickKnown(parsed));
         debug.event("config-loaded", { file });
       }
-    } catch {
-      // missing or unreadable — skip
+    } catch (e) {
+      const code = (e as NodeJS.ErrnoException).code;
+      if (code !== "ENOENT") {
+        logWarn("config", { event: "load-failed", file, error: e instanceof Error ? e.message : String(e) });
+      }
     }
   }
   return merged;
