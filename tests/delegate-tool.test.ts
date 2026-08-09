@@ -3,9 +3,13 @@ import assert from "node:assert/strict";
 import { buildChildArgs, injectedWaitMessage } from "../src/delegate-tool.js";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 
-/** Minimal ctx mock - buildChildArgs only reads ctx.model. */
-function mockCtx(): ExtensionContext {
-  return { model: { provider: "test", id: "test-model" } } as unknown as ExtensionContext;
+/** Minimal ctx mock - buildChildArgs reads ctx.model and sessionManager. */
+function mockCtx(host: "pi" | "omp" = "pi"): ExtensionContext {
+  const sessionManager =
+    host === "pi"
+      ? { buildContextEntries: () => [] }
+      : { getBranch: () => [] };
+  return { model: { provider: "test", id: "test-model" }, sessionManager } as unknown as ExtensionContext;
 }
 
 const RESTRICTED_ROLES = ["reviewer", "researcher", "planner", "oracle"] as const;
@@ -166,4 +170,41 @@ test("injectedWaitMessage surfaces remaining delegates and tolerates a missing f
   );
   assert.ok(msg!.includes("2 delegates are still running"), "passes through the remaining line");
   assert.ok(!msg!.includes("read the result file"), "omits the file line when file is absent");
+});
+
+// ─── host detection: --mode json (pi) vs -p fallback (omp) ──────────────────
+
+test("buildChildArgs uses --mode json on pi for async delegates", async () => {
+  const { cliArgs, isAsync, useJsonStream } = await buildChildArgs(
+    { agent: "worker", task: "test" },
+    "prompt",
+    mockCtx("pi"),
+  );
+  assert.equal(isAsync, true);
+  assert.equal(useJsonStream, true);
+  assert.deepEqual(cliArgs.slice(0, 2), ["--mode", "json"]);
+});
+
+test("buildChildArgs falls back to -p on omp for async delegates", async () => {
+  const { cliArgs, isAsync, useJsonStream } = await buildChildArgs(
+    { agent: "worker", task: "test" },
+    "prompt",
+    mockCtx("omp"),
+  );
+  assert.equal(isAsync, true);
+  assert.equal(useJsonStream, false);
+  assert.equal(cliArgs[0], "-p");
+});
+
+test("buildChildArgs keeps -p for sync delegates even on pi", async () => {
+  const ctx = mockCtx("pi") as ExtensionContext & { mode: string };
+  ctx.mode = "print";
+  const { cliArgs, isAsync, useJsonStream } = await buildChildArgs(
+    { agent: "worker", task: "test" },
+    "prompt",
+    ctx,
+  );
+  assert.equal(isAsync, false);
+  assert.equal(useJsonStream, false);
+  assert.equal(cliArgs[0], "-p");
 });
