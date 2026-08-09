@@ -24,6 +24,14 @@ export function readContextEntries(sm: ExtensionContext["sessionManager"]): Sess
   return [];
 }
 
+// True only on pi: `--mode json` event streaming (used by async delegates) is a
+// pi feature. omp (oh-my-pi) has no json mode, so delegates must fall back to
+// `-p` there — same detection as readContextEntries above.
+export function isPiHost(sm: ExtensionContext["sessionManager"]): boolean {
+  const source = sm as unknown as SessionEntrySource;
+  return typeof source.buildContextEntries === "function";
+}
+
 export interface AcpRuntime {
   core: CompressionCore;
   store: SessionStateStore;
