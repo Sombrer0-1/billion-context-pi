@@ -18,13 +18,15 @@ import { coreOutToAgentMessages } from "./messages.js";
 import { ACP_SYSTEM_PROMPT, ACP_DELEGATE_PROMPT } from "./system-prompt.js";
 import { delegateStatusWidget } from "./fleet-widget.js";
 import { wireToolGuardrails } from "./tool-guardrails.js";
-import { debug, setDebugEnabled } from "./log.js";
+import { debug, setDebugEnabled, logError, logInfo, logWarn, logThrow, closeLogStream } from "./log.js";
 import { collectCoveredMessageIds, estimateTokens, lastUserMessageId } from "./tokens.js";
 import { checkForUpdate } from "./update.js";
 import { runSetupAndNotify } from "./setup-subagent-tools.js";
 import { loadUserConfig, applyUserConfig } from "./user-config.js";
 
 type AgentMessage = SessionMessageEntry["message"];
+
+declare const CURRENT_VERSION: string;
 
 export function createAcpExtension(adapter: AdapterConfig = {}): ExtensionFactory {
   return (pi: ExtensionAPI) => {
@@ -60,15 +62,14 @@ function wireSessionLifecycle(pi: ExtensionAPI, runtime: AcpRuntime): void {
   pi.on("session_start", async (_event, ctx) => {
     runtime.store.invalidate();
     runtime.clearNudgeTracking();
-    // Load user config (~/.pi/acp.json + project .pi/acp.json) and apply it so
-    // debug/terminalNudge/autoUpdate/modelContextLimit are runtime-configurable
-    // without env vars or reinstalling.
+    const sid = ctx.sessionManager.getSessionId();
+    logInfo("session", { event: "start", sid, cwd: ctx.cwd, debug: runtime.adapter.debug ?? null, version: typeof CURRENT_VERSION !== "undefined" ? CURRENT_VERSION : null });
     try {
       const user = await loadUserConfig(ctx.cwd);
       runtime.setAdapter(applyUserConfig(runtime.adapter, user));
       if (runtime.adapter.debug !== undefined) setDebugEnabled(runtime.adapter.debug);
-    } catch {
-      // best-effort — fall back to factory/env config
+    } catch (e) {
+      logThrow("config", e, { sid, phase: "session_start" });
     }
     if (runtime.adapter.delegate !== false) {
       pi.registerTool(makeDelegateTool(pi));
@@ -90,6 +91,7 @@ function wireSessionLifecycle(pi: ExtensionAPI, runtime: AcpRuntime): void {
   });
   pi.on("session_shutdown", () => {
     delegateStatusWidget.dispose();
+    closeLogStream();
   });
 }
 
@@ -129,6 +131,19 @@ function wireContextTransform(pi: ExtensionAPI, runtime: AcpRuntime): void {
 
       const turn = runtime.core.processTurn({ messages: coreMessages, state, config, tokenCount });
       await runtime.save(turn.state, ctx);
+
+      logInfo("turn", {
+        sid,
+        inMsgs: coreMessages.length,
+        outMsgs: turn.messages.length,
+        tokens: tokenCount,
+        pct: realUsage?.percent ?? (config.modelContextLimit > 0 ? Math.round((tokenCount / config.modelContextLimit) * 100) : null),
+        limit: config.modelContextLimit,
+        nudge: turn.nudge?.shouldInject ? (turn.nudge.breakdown?.emergencyOverride === 1 ? "emergency" : "active") : "idle",
+        nudgeReason: turn.nudge?.reason ?? null,
+        blocks: turn.state.blocks.length,
+        activeBlocks: turn.state.blocks.filter((b) => b.active).length,
+      });
 
       debug.event("processTurn", {
         outMsgs: turn.messages.length,
@@ -172,6 +187,9 @@ function wireContextTransform(pi: ExtensionAPI, runtime: AcpRuntime): void {
         const rendered = renderNudgeText(turn.nudge);
         const top = [...turn.nudge.compressibleRanges].sort((a, b) => b.tokens - a.tokens)[0];
         const example = top ? `\n\nExample: compress({ content: [{ startId: "${top.startRef}", endId: "${top.endRef}", summary: "..." }] })` : "";
+        if (emergency) {
+          logWarn("nudge", { sid: ctx.sessionManager.getSessionId(), event: "emergency-inject", pct: Math.round(turn.nudge.contextUsage * 100), voice: rendered.voice, compressible: turn.nudge.compressibleRanges.length });
+        }
         if (debugOn && ctx.hasUI) {
           ctx.ui.notify(`[ACP nudge → context]${emergency ? " [EMERGENCY]" : ""}\n${rendered.text}${example}`);
         }
@@ -193,6 +211,9 @@ function wireContextTransform(pi: ExtensionAPI, runtime: AcpRuntime): void {
       if (ctx.hasUI) ctx.ui.notify(msg);
     });
     return { messages: rebuilt };
+    } catch (e) {
+      logThrow("context", e, { sid, phase: "transform" });
+      throw e;
     } finally {
       release();
     }

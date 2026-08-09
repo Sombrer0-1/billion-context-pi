@@ -14,7 +14,9 @@ export interface AdapterConfig {
    *  Disable via `autoUpdate: false` or env `ACP_AUTO_UPDATE=0` to avoid all
    *  network calls on startup. */
   autoUpdate?: boolean;
-  /** Write ACP debug events to the debug log file (default ~/.pi/acp-debug.log).
+  /** Enable debug-level events in the ACP log file (default ~/.pi/acp.log).
+   *  Always-on events (session/turn/compress/delegate lifecycle, all errors and
+   *  warnings) are written regardless; `debug` only adds verbose diagnostics.
    *  Default: false (or env ACP_DEBUG=1/true). */
   debug?: boolean;
   /** Enable acp_delegate tools (delegate/wait/cancel) and their system-prompt
