@@ -53,13 +53,18 @@ async function handleCompress(args: CompressArgs, runtime: AcpRuntime, ctx: Exte
   if (ranges.length === 0) return "No ranges provided.";
   const { state, coreMessages } = await runtime.stateFor(ctx);
   const config = runtime.configFor(ctx);
-
-  const beforeTokens = estimateTokens(coreMessages, collectCoveredMessageIds(state));
+  // 显示层对齐（文档 §3.3）：beforeTokens 走密度校准口径，与 kernel 的
+  // countTokens（已乘 density）同口径，模型看到的数字接近真实占用。
+  const modelId = (ctx.model as { id?: string } | undefined)?.id ?? "default";
+  const density = runtime.density.densityFor(modelId);
+  const beforeTokens = Math.round(estimateTokens(coreMessages, collectCoveredMessageIds(state)) * density);
   const summaryMaxChars = args.summaryMaxChars;
   const topLevelTopic = args.topic;
 
   debug.event("compress-in", {
     sid: ctx.sessionManager.getSessionId(),
+    modelId,
+    density,
     ranges: ranges.length,
     spans: ranges.map((r) => ({ span: `${r.startId}..${r.endId}`, summaryLen: r.summary.length, summary: r.summary, topic: r.topic ?? topLevelTopic ?? null })),
     blocksBefore: state.blocks.length,
@@ -67,7 +72,6 @@ async function handleCompress(args: CompressArgs, runtime: AcpRuntime, ctx: Exte
     beforeMsgCount: coreMessages.length,
     beforeTokens,
   });
-
   const applied = runtime.core.applyCompression({
     ranges: ranges.map((r) => ({ startRef: r.startId, endRef: r.endId, summary: r.summary, topic: r.topic ?? topLevelTopic, summaryMaxChars, compressCallId: toolCallId })),
     messages: coreMessages,
