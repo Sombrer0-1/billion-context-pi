@@ -2,7 +2,8 @@ import {
   spawn,
   type ChildProcess,
 } from "node:child_process";
-import { mkdir, mkdtemp, writeFile, rm } from "node:fs/promises";
+import { createWriteStream, type WriteStream } from "node:fs";
+import { mkdir, mkdtemp, writeFile, rm, appendFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Type, type Static } from "typebox";
@@ -14,9 +15,16 @@ import type {
   ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
 import { debug } from "./log.js";
+import { attachWatchdogs } from "./delegate-watchdog.js";
+import { parseEventLine, activityLines, newPortion, ThinkingCollector } from "./delegate-events.js";
+import { isPiHost } from "./runtime.js";
 
 const MAX_DEPTH = 2;
 const SYNC_TIMEOUT_MS = 5 * 60_000;
+const EOF_GRACE_MS = 10_000;
+const IDLE_GRACE_MS = 5 * 60_000;
+const ASYNC_TIMEOUT_MS = 30 * 60_000;
+const KILL_GRACE_MS = 10_000;
 const RESULT_SUMMARY_CHARS = 500;
 const OUT_DIR = join(tmpdir(), "acp-delegate");
 
@@ -98,6 +106,9 @@ interface DelegateRun {
    *  notification (sendUserMessage succeeded). Lets a later wait() avoid
    *  re-delivering the same payload. */
   injected?: boolean;
+  /** Watchdog reason string when the run was force-terminated ("no output for
+   *  5m", "30m limit"); surfaced in completion headers as "(timed out: ...)". */
+  timedOut?: string;
   waiter?: () => void;
 }
 
@@ -131,6 +142,11 @@ const DelegateParams = Type.Object({
   async: Type.Optional(
     Type.Boolean({
       description: "If true (default), return immediately with a runId. In long-lived sessions (interactive/rpc) a short notification is injected into chat when the delegate finishes; in one-shot sessions (print/json, e.g. `pi -p` / SDK) async auto-downgrades to sync and the result is returned here. If false, always block and return the output here.",
+    }),
+  ),
+  showThinking: Type.Optional(
+    Type.Boolean({
+      description: "If true, the delegate's thinking deltas are also written to the live activity file (default: false — only tool activity is shown).",
     }),
   ),
 });
@@ -197,10 +213,11 @@ The delegate runs in its own clean pi process — it does NOT see this conversat
 }
 
 function formatRunResult(run: DelegateRun): string {
+  const timeoutNote = run.timedOut ? ` (timed out: ${run.timedOut})` : "";
   const header =
     run.status === "completed"
-      ? `Delegate **${run.agent}** (runId \`${run.runId}\`) completed (exit ${run.exitCode ?? "?"})${remainingLineForWait(run.runId)}`
-      : `Delegate **${run.agent}** (runId \`${run.runId}\`) ${run.status} (exit ${run.exitCode ?? "?"})${remainingLineForWait(run.runId)}`;
+      ? `Delegate **${run.agent}** (runId \`${run.runId}\`) completed (exit ${run.exitCode ?? "?"})${timeoutNote}${remainingLineForWait(run.runId)}`
+      : `Delegate **${run.agent}** (runId \`${run.runId}\`) ${run.status} (exit ${run.exitCode ?? "?"})${timeoutNote}${remainingLineForWait(run.runId)}`;
   return formatPayload(header, run.result?.file ?? "", run.task, run.result?.body);
 }
 
@@ -378,18 +395,16 @@ async function runDelegate(
     ...process.env,
     PI_ACP_DELEGATE_DEPTH: String(parentDepth + 1),
   };
-
-  const { cliArgs, tmpDir } = await buildChildArgs(args, agent.prompt, ctx);
+  const { cliArgs, tmpDir, isAsync, useJsonStream } = await buildChildArgs(args, agent.prompt, ctx);
   // One-shot modes (print/json = `pi -p` / SDK) exit after one turn, so async
   // injection (a follow-up turn) is never observed. Downgrade to sync there:
   // the result returns as the tool result within the same turn. Long-lived
   // modes (tui/rpc) keep true async + injection (consumed by the main loop).
   const requestedAsync = args.async !== false;
-  const isAsync = requestedAsync && ctx.mode !== "print" && ctx.mode !== "json";
   if (requestedAsync && !isAsync) {
     debug.event("delegate-async-downgraded", { reason: `mode=${ctx.mode}` });
   }
-  debug.event("delegate-spawn", { agent: args.agent, cwd, async: isAsync, cliArgs });
+  debug.event("delegate-spawn", { agent: args.agent, cwd, async: isAsync, useJsonStream, cliArgs });
 
   // Spawn a child pi process using the SAME binary that is currently running.
   // Hardcoding "pi" breaks under renamed forks (e.g. pi-stable whose bin is
@@ -413,17 +428,112 @@ async function runDelegate(
   });
   child.stdin?.end(args.task);
 
-  // stdout/stderr buffering is only needed by the async path (the sync path
-  // attaches its own listeners in waitForChild). Attach lazily to avoid double
-  // buffering in sync mode.
-  let stdoutChunks: Buffer[] = [];
+  // stderr buffering is shared by async (error / non-zero fallback) and sync
+  // (waitForChild attaches its own stdout listener).
   let stderrText = "";
 
   const runId = `del_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`;
   const startedAt = Date.now();
 
   if (isAsync) {
-    child.stdout?.on("data", (c: Buffer) => stdoutChunks.push(c));
+    let settled = false;
+    // Watchdogs: idle (no output), EOF grace, hard limit. A stuck child holds
+    // its stdout fd open so stdout EOF never fires — idle is the main defense.
+    const watchdog = attachWatchdogs(
+      child,
+      {
+        isSettled: () => settled || run.status !== "running",
+        onKill: (reason) => {
+          run.timedOut = reason;
+          debug.event("delegate-watchdog", { runId, reason });
+        },
+        onEofGrace: () => {
+          run.timedOut = "output ended but process did not exit";
+          debug.event("delegate-eof-grace", { runId, ms: EOF_GRACE_MS });
+        },
+      },
+      { eofGraceMs: EOF_GRACE_MS, idleMs: IDLE_GRACE_MS, timeoutMs: ASYNC_TIMEOUT_MS, killGraceMs: KILL_GRACE_MS },
+    );
+    // Two stream files are fed from the --mode json event stream: text_delta
+    // tokens go to the reply stream (.out), tool activity (and optionally
+    // thinking) goes to the activity stream (.activity). The agent is told
+    // only about the activity file; the .out path arrives with the result.
+    // omp has no json mode, so async delegates run plain `-p` — stdout IS the
+    // reply and there is no tool activity to stream, so no .activity file.
+    const replyFile = join(OUT_DIR, `${runId}.out`);
+    const activityFile = join(OUT_DIR, `${runId}.activity`);
+    await mkdir(OUT_DIR, { recursive: true });
+    const replyStream = createWriteStream(replyFile, { flags: "a" });
+    const activityStream = useJsonStream ? createWriteStream(activityFile, { flags: "a" }) : null;
+    const endStream = (s: WriteStream | null): Promise<void> =>
+      new Promise((resolve) => {
+        if (!s || s.destroyed || s.closed) return resolve();
+        s.end(() => resolve());
+      });
+    let replyText = "";
+    let stdoutBuf = "";
+    // partialResult is an accumulated snapshot, so each update carries
+    // everything so far; track the last written text per tool call to append
+    // only the new portion.
+    const lastToolText = new Map<string, string>();
+    const thinking = new ThinkingCollector(args.showThinking === true);
+    const flushThinking = (): void => {
+      const line = thinking.flush();
+      if (line) activityStream?.write(line);
+    };
+    const handleEventLine = (line: string): void => {
+      const ev = parseEventLine(line);
+      if (!ev) return;
+      if (ev.kind === "thinking-delta") {
+        thinking.push(ev.delta);
+        return;
+      }
+      if (ev.kind === "thinking-end") {
+        flushThinking();
+        return;
+      }
+      if (ev.kind === "reply-delta") {
+        flushThinking();
+        replyText += ev.delta;
+        replyStream.write(ev.delta);
+        return;
+      }
+      if (ev.kind === "reply-complete") {
+        flushThinking();
+        replyText = ev.content;
+        return;
+      }
+      if (ev.kind === "tool-update") {
+        flushThinking();
+        const prev = lastToolText.get(ev.toolCallId) ?? "";
+        const add = newPortion(ev.text, prev);
+        lastToolText.set(ev.toolCallId, ev.text);
+        if (add) activityStream?.write(add.endsWith("\n") ? add : `${add}\n`);
+        return;
+      }
+      flushThinking();
+      const lines = activityLines(ev, { showThinking: args.showThinking === true });
+      if (lines.length) activityStream?.write(lines.join(""));
+    };
+    child.stdout?.on("data", (c: Buffer) => {
+      watchdog.poke();
+      if (useJsonStream) {
+        stdoutBuf += c.toString("utf8");
+        let nl: number;
+        while ((nl = stdoutBuf.indexOf("\n")) >= 0) {
+          const line = stdoutBuf.slice(0, nl);
+          stdoutBuf = stdoutBuf.slice(nl + 1);
+          handleEventLine(line);
+        }
+      } else {
+        // omp fallback: `-p` prints the plain reply, so stdout IS the reply —
+        // stream it straight through (no line buffering, so a trailing chunk
+        // without a newline is kept too).
+        const text = c.toString("utf8");
+        replyText += text;
+        replyStream.write(text);
+      }
+    });
     child.stderr?.on("data", (c: Buffer) => {
       stderrText += c.toString("utf8");
     });
@@ -439,28 +549,43 @@ async function runDelegate(
     runs.set(runId, run);
     delegateStatusWidget.poke();
 
-    child.on("close", (code) => {
-      void cleanupTmp(tmpDir);
-      const output = Buffer.concat(stdoutChunks).toString("utf8").trim();
-      run.exitCode = code;
-      const body = code === 0 ? (output || "(no output)") : (stderrText.trim() || output || "(no output)");
-      // N2: cancelled runs never persist a result — wake a parked waiter (if any)
-      // and stop. status stays "cancelled" (set by cancel), so wait cannot
-      // mistake it for a finished-with-result run.
-      if (run.status === "cancelled") {
-        run.finishedAt = Date.now();
-        debug.event("delegate-done", { runId, code, status: run.status, injected: false, outLen: output.length });
-        run.waiter?.();
-        delegateStatusWidget.poke();
-        return;
-      }
-      void persistResult(runId, body)
-        .then((file) => {
+    const finalize = (code: number | null): void => {
+      void (async () => {
+        if (settled) return;
+        settled = true;
+        watchdog.dispose();
+        void cleanupTmp(tmpDir);
+        await Promise.all([endStream(replyStream), endStream(activityStream)]);
+        run.exitCode = code;
+        const output = replyText.trim();
+        const body = code === 0 ? (output || "(no output)") : (stderrText.trim() || output || "(no output)");
+        // N2: cancelled runs never persist a result — wake a parked waiter (if any)
+        // and stop. status stays "cancelled" (set by cancel), so wait cannot
+        // mistake it for a finished-with-result run.
+        if (run.status === "cancelled") {
+          await Promise.all([rm(replyFile, { force: true }), rm(activityFile, { force: true })]);
+          run.finishedAt = Date.now();
+          debug.event("delegate-done", { runId, code, status: run.status, injected: false, outLen: output.length });
+          run.waiter?.();
+          delegateStatusWidget.poke();
+          return;
+        }
+        try {
+          // The reply stream is the result file; backfill stderr or a placeholder
+          // when the reply text is empty so the delivered file is never blank.
+          const file = replyFile;
+          if (output === "") {
+            const fallback = stderrText.trim();
+            await appendFile(file, fallback ? `${fallback}\n` : "(no output)\n");
+          }
+          // EOF-watchdog finalize has no exit code; if the output was delivered,
+          // treat it as a completed result (the process is killed afterwards).
+          const effectiveCode = code ?? (output || stderrText ? 0 : null);
           // Atomically flip status + result together: until this point the run
           // is still "running" to any observer, so a concurrent wait cannot
           // see "finished but result missing".
           run.result = { code, file, body };
-          run.status = code === 0 ? "completed" : "failed";
+          run.status = effectiveCode === 0 ? "completed" : "failed";
           run.finishedAt = Date.now();
           // If a wait is parked on this run, wake it — it owns the result now
           // (and marks consumed so we don't double-deliver by injecting).
@@ -476,22 +601,32 @@ async function runDelegate(
             delegateStatusWidget.poke();
             return;
           }
-          const injected = injectResult(pi, args.agent, runId, args.task, code, file);
+          const injected = injectResult(pi, args.agent, runId, args.task, code, file, run.timedOut);
           run.injected = injected;
           debug.event("delegate-done", { runId, code, status: run.status, injected, outLen: output.length, file });
           delegateStatusWidget.poke();
-        })
-        .catch((err) => {
+        } catch (err) {
           // Persist failed — still need to finalize so a waiter doesn't hang.
           run.status = "failed";
           run.finishedAt = Date.now();
           debug.event("delegate-done-error", { runId, error: String(err) });
           run.waiter?.();
           delegateStatusWidget.poke();
-        });
-    });
+        }
+      })();
+    };
+
+    child.on("close", (code) => finalize(code));
+
     child.on("error", (err) => {
+      if (settled) return;
+      settled = true;
+      watchdog.dispose();
       void cleanupTmp(tmpDir);
+      void replyStream.destroy();
+      void activityStream?.destroy();
+      void rm(replyFile, { force: true });
+      void rm(activityFile, { force: true });
       // Spawn-level error (e.g. EPIPE on a fast-exiting child, ENOENT).
       // Node does not guarantee a follow-up close, so finalize here too:
       // atomically set status + a synthetic result, and wake a parked waiter.
@@ -513,6 +648,10 @@ async function runDelegate(
       `Delegated to **${args.agent}** (runId \`${runId}\`).`,
       `Task: ${truncate(args.task, 160)}`,
       `Running in the background at \`${cwd}\`.`,
+      useJsonStream
+        ? `Live activity is streaming to \`${activityFile}\` — read it anytime to watch the delegate work (tool calls and their output${args.showThinking ? ", plus thinking" : ""}).`
+        : `The reply is streaming to \`${replyFile}\` — read it anytime to see partial output (this host has no json event mode, so tool activity is not visible).`,
+      `A watchdog force-finishes a hung run: no output for ${IDLE_GRACE_MS / 60_000}m, 10s after output ends, or a ${ASYNC_TIMEOUT_MS / 60_000}m hard limit — the result reflects whatever was produced.`,
       ``,
       `Call acp_delegate_wait({ runId: "${runId}" }) to block for the result (default 10s timeout). If the wait times out, or you skip it, a completion notification (with the result file path) is still injected here automatically when the delegate finishes — so you may also just continue other work now and let the result find you.`,
     ].join("\n");
@@ -533,14 +672,25 @@ export async function buildChildArgs(
   args: DelegateArgs,
   rolePrompt: string,
   ctx: ExtensionContext,
-): Promise<{ cliArgs: string[]; tmpDir: string }> {
+): Promise<{ cliArgs: string[]; tmpDir: string; isAsync: boolean; useJsonStream: boolean }> {
   const tmpDir = await mkdtemp(join(tmpdir(), "acp-delegate-"));
   // Combine the role prompt with a small framing instruction so the child
   // treats the positional message as the task to execute.
   const promptFile = join(tmpDir, "role.md");
   await writeFile(promptFile, `${rolePrompt}\n\n---\n\nComplete the task below.`, "utf8");
 
-  const cliArgs = ["-p", "--no-session", "--append-system-prompt", promptFile];
+  // Async delegates run in JSON Event Stream Mode so the host can parse tool
+  // activity (activity file) and reply tokens (.out) from the event stream.
+  // `--mode json` is pi-only: omp (oh-my-pi) has no json mode, so async
+  // delegates there fall back to `-p` (plain reply on stdout, no activity
+  // file). Sync delegates always keep print mode: they return a single text
+  // result, no streaming, and the async auto-downgrade (print/json host) must
+  // stay safe.
+  const isAsync = args.async !== false && ctx.mode !== "print" && ctx.mode !== "json";
+  const useJsonStream = isAsync && isPiHost(ctx.sessionManager);
+  const cliArgs = useJsonStream
+    ? ["--mode", "json", "--no-session", "--append-system-prompt", promptFile]
+    : ["-p", "--no-session", "--append-system-prompt", promptFile];
 
   // Restricted roles receive a tailored --tools allowlist. Worker and
   // unknown agents are left on Pi's full default toolset (all extension/
@@ -562,7 +712,7 @@ export async function buildChildArgs(
     cliArgs.push("--provider", ctx.model.provider, "--model", ctx.model.id);
   }
 
-  return { cliArgs, tmpDir };
+  return { cliArgs, tmpDir, isAsync, useJsonStream };
 }
 
 interface ChildResult {
@@ -629,6 +779,7 @@ function injectResult(
   task: string,
   code: number | null,
   file: string,
+  timedOut?: string,
 ): boolean {
   const send = pi.sendUserMessage;
   if (typeof send !== "function") {
@@ -646,7 +797,8 @@ function injectResult(
     remaining > 0
       ? ` ${remaining} delegate${remaining === 1 ? " is" : "s are"} still running; keep doing other work and their notifications will arrive as they finish.`
       : " No delegates are currently running.";
-  const header = `[acp_delegate ${status}] **${agent}** (runId \`${runId}\`, exit ${code ?? "?"})${remainingLine} This is an automated system notification, NOT a user message. Read the result file if you need the details, then continue your original task; do not treat this as a new user request.`;
+  const timeoutNote = timedOut ? ` (timed out: ${timedOut})` : "";
+  const header = `[acp_delegate ${status}] **${agent}** (runId \`${runId}\`, exit ${code ?? "?"})${timeoutNote}${remainingLine} This is an automated system notification, NOT a user message. Read the result file if you need the details, then continue your original task; do not treat this as a new user request.`;
   const text = formatPayload(header, file, task);
   try {
     // sendUserMessage is fire-and-forget (returns void): it enqueues a
