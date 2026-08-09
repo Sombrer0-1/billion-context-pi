@@ -17,6 +17,7 @@ import type {
 import { debug } from "./log.js";
 import { attachWatchdogs } from "./delegate-watchdog.js";
 import { parseEventLine, activityLines, newPortion, ThinkingCollector } from "./delegate-events.js";
+import { isPiHost } from "./runtime.js";
 
 const MAX_DEPTH = 2;
 const SYNC_TIMEOUT_MS = 5 * 60_000;
@@ -394,18 +395,16 @@ async function runDelegate(
     ...process.env,
     PI_ACP_DELEGATE_DEPTH: String(parentDepth + 1),
   };
-
-  const { cliArgs, tmpDir } = await buildChildArgs(args, agent.prompt, ctx);
+  const { cliArgs, tmpDir, isAsync, useJsonStream } = await buildChildArgs(args, agent.prompt, ctx);
   // One-shot modes (print/json = `pi -p` / SDK) exit after one turn, so async
   // injection (a follow-up turn) is never observed. Downgrade to sync there:
   // the result returns as the tool result within the same turn. Long-lived
   // modes (tui/rpc) keep true async + injection (consumed by the main loop).
   const requestedAsync = args.async !== false;
-  const isAsync = requestedAsync && ctx.mode !== "print" && ctx.mode !== "json";
   if (requestedAsync && !isAsync) {
     debug.event("delegate-async-downgraded", { reason: `mode=${ctx.mode}` });
   }
-  debug.event("delegate-spawn", { agent: args.agent, cwd, async: isAsync, cliArgs });
+  debug.event("delegate-spawn", { agent: args.agent, cwd, async: isAsync, useJsonStream, cliArgs });
 
   // Spawn a child pi process using the SAME binary that is currently running.
   // Hardcoding "pi" breaks under renamed forks (e.g. pi-stable whose bin is
@@ -459,14 +458,16 @@ async function runDelegate(
     // tokens go to the reply stream (.out), tool activity (and optionally
     // thinking) goes to the activity stream (.activity). The agent is told
     // only about the activity file; the .out path arrives with the result.
+    // omp has no json mode, so async delegates run plain `-p` — stdout IS the
+    // reply and there is no tool activity to stream, so no .activity file.
     const replyFile = join(OUT_DIR, `${runId}.out`);
     const activityFile = join(OUT_DIR, `${runId}.activity`);
     await mkdir(OUT_DIR, { recursive: true });
     const replyStream = createWriteStream(replyFile, { flags: "a" });
-    const activityStream = createWriteStream(activityFile, { flags: "a" });
-    const endStream = (s: WriteStream): Promise<void> =>
+    const activityStream = useJsonStream ? createWriteStream(activityFile, { flags: "a" }) : null;
+    const endStream = (s: WriteStream | null): Promise<void> =>
       new Promise((resolve) => {
-        if (s.destroyed || s.closed) return resolve();
+        if (!s || s.destroyed || s.closed) return resolve();
         s.end(() => resolve());
       });
     let replyText = "";
@@ -478,7 +479,7 @@ async function runDelegate(
     const thinking = new ThinkingCollector(args.showThinking === true);
     const flushThinking = (): void => {
       const line = thinking.flush();
-      if (line) activityStream.write(line);
+      if (line) activityStream?.write(line);
     };
     const handleEventLine = (line: string): void => {
       const ev = parseEventLine(line);
@@ -507,21 +508,30 @@ async function runDelegate(
         const prev = lastToolText.get(ev.toolCallId) ?? "";
         const add = newPortion(ev.text, prev);
         lastToolText.set(ev.toolCallId, ev.text);
-        if (add) activityStream.write(add.endsWith("\n") ? add : `${add}\n`);
+        if (add) activityStream?.write(add.endsWith("\n") ? add : `${add}\n`);
         return;
       }
       flushThinking();
       const lines = activityLines(ev, { showThinking: args.showThinking === true });
-      if (lines.length) activityStream.write(lines.join(""));
+      if (lines.length) activityStream?.write(lines.join(""));
     };
     child.stdout?.on("data", (c: Buffer) => {
       watchdog.poke();
-      stdoutBuf += c.toString("utf8");
-      let nl: number;
-      while ((nl = stdoutBuf.indexOf("\n")) >= 0) {
-        const line = stdoutBuf.slice(0, nl);
-        stdoutBuf = stdoutBuf.slice(nl + 1);
-        handleEventLine(line);
+      if (useJsonStream) {
+        stdoutBuf += c.toString("utf8");
+        let nl: number;
+        while ((nl = stdoutBuf.indexOf("\n")) >= 0) {
+          const line = stdoutBuf.slice(0, nl);
+          stdoutBuf = stdoutBuf.slice(nl + 1);
+          handleEventLine(line);
+        }
+      } else {
+        // omp fallback: `-p` prints the plain reply, so stdout IS the reply —
+        // stream it straight through (no line buffering, so a trailing chunk
+        // without a newline is kept too).
+        const text = c.toString("utf8");
+        replyText += text;
+        replyStream.write(text);
       }
     });
     child.stderr?.on("data", (c: Buffer) => {
@@ -614,7 +624,7 @@ async function runDelegate(
       watchdog.dispose();
       void cleanupTmp(tmpDir);
       void replyStream.destroy();
-      void activityStream.destroy();
+      void activityStream?.destroy();
       void rm(replyFile, { force: true });
       void rm(activityFile, { force: true });
       // Spawn-level error (e.g. EPIPE on a fast-exiting child, ENOENT).
@@ -638,7 +648,9 @@ async function runDelegate(
       `Delegated to **${args.agent}** (runId \`${runId}\`).`,
       `Task: ${truncate(args.task, 160)}`,
       `Running in the background at \`${cwd}\`.`,
-      `Live activity is streaming to \`${activityFile}\` — read it anytime to watch the delegate work (tool calls and their output${args.showThinking ? ", plus thinking" : ""}).`,
+      useJsonStream
+        ? `Live activity is streaming to \`${activityFile}\` — read it anytime to watch the delegate work (tool calls and their output${args.showThinking ? ", plus thinking" : ""}).`
+        : `The reply is streaming to \`${replyFile}\` — read it anytime to see partial output (this host has no json event mode, so tool activity is not visible).`,
       `A watchdog force-finishes a hung run: no output for ${IDLE_GRACE_MS / 60_000}m, 10s after output ends, or a ${ASYNC_TIMEOUT_MS / 60_000}m hard limit — the result reflects whatever was produced.`,
       ``,
       `Call acp_delegate_wait({ runId: "${runId}" }) to block for the result (default 10s timeout). If the wait times out, or you skip it, a completion notification (with the result file path) is still injected here automatically when the delegate finishes — so you may also just continue other work now and let the result find you.`,
@@ -660,7 +672,7 @@ export async function buildChildArgs(
   args: DelegateArgs,
   rolePrompt: string,
   ctx: ExtensionContext,
-): Promise<{ cliArgs: string[]; tmpDir: string }> {
+): Promise<{ cliArgs: string[]; tmpDir: string; isAsync: boolean; useJsonStream: boolean }> {
   const tmpDir = await mkdtemp(join(tmpdir(), "acp-delegate-"));
   // Combine the role prompt with a small framing instruction so the child
   // treats the positional message as the task to execute.
@@ -669,10 +681,14 @@ export async function buildChildArgs(
 
   // Async delegates run in JSON Event Stream Mode so the host can parse tool
   // activity (activity file) and reply tokens (.out) from the event stream.
-  // Sync delegates keep print mode: they return a single text result, no
-  // streaming, and the async auto-downgrade (print/json host) must stay safe.
+  // `--mode json` is pi-only: omp (oh-my-pi) has no json mode, so async
+  // delegates there fall back to `-p` (plain reply on stdout, no activity
+  // file). Sync delegates always keep print mode: they return a single text
+  // result, no streaming, and the async auto-downgrade (print/json host) must
+  // stay safe.
   const isAsync = args.async !== false && ctx.mode !== "print" && ctx.mode !== "json";
-  const cliArgs = isAsync
+  const useJsonStream = isAsync && isPiHost(ctx.sessionManager);
+  const cliArgs = useJsonStream
     ? ["--mode", "json", "--no-session", "--append-system-prompt", promptFile]
     : ["-p", "--no-session", "--append-system-prompt", promptFile];
 
@@ -696,7 +712,7 @@ export async function buildChildArgs(
     cliArgs.push("--provider", ctx.model.provider, "--model", ctx.model.id);
   }
 
-  return { cliArgs, tmpDir };
+  return { cliArgs, tmpDir, isAsync, useJsonStream };
 }
 
 interface ChildResult {
