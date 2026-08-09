@@ -64,13 +64,14 @@ async function readPackageJson(path: string): Promise<PackageJson | undefined> {
   }
 }
 
-function findNpmRoot(extDir: string): string | undefined {
+export function findNpmRoot(extDir: string): string | undefined {
   let dir = dirname(extDir);
-  while (dir !== "/" && dir !== ".") {
+  for (;;) {
     if (dir.endsWith("node_modules")) return dirname(dir);
-    dir = dirname(dir);
+    const parent = dirname(dir);
+    if (parent === dir) return undefined;
+    dir = parent;
   }
-  return undefined;
 }
 
 async function findExtensionDir(): Promise<string | undefined> {
