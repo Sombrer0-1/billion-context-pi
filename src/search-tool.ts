@@ -3,6 +3,7 @@ import type { AgentToolResult, ExtensionContext, ToolDefinition } from "@earendi
 import { searchBlocks, type SearchResult } from "acp-kernel";
 import type { AcpRuntime } from "./runtime.js";
 import { buildSearchDocs } from "./search-index.js";
+import { logThrow } from "./log.js";
 
 const SearchParams = Type.Object({
     query: Type.String({ description: "Keywords to locate detail folded into compressed summaries or historical messages." }),
@@ -25,7 +26,13 @@ export function makeSearchTool(runtime: AcpRuntime): ToolDefinition<typeof Searc
         ],
         parameters: SearchParams,
         async execute(_toolCallId, params, _signal, _onUpdate, ctx): Promise<AgentToolResult<unknown>> {
-            const result = await handleSearch(params as SearchArgs, runtime, ctx);
+            let result: string;
+            try {
+                result = await handleSearch(params as SearchArgs, runtime, ctx);
+            } catch (e) {
+                logThrow("search", e, { sid: ctx.sessionManager.getSessionId(), query: (params as SearchArgs).query });
+                throw e;
+            }
             return { details: undefined, content: [{ type: "text", text: result }] };
         },
     };

@@ -5,7 +5,7 @@ import type {
   ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
 import type { AcpRuntime } from "./runtime.js";
-import { debug } from "./log.js";
+import { debug, logError, logInfo, logThrow } from "./log.js";
 import { estimateTokens, collectCoveredMessageIds } from "./tokens.js";
 
 function formatK(n: number): string {
@@ -42,7 +42,13 @@ export function makeCompressTool(runtime: AcpRuntime): ToolDefinition<typeof Com
     ],
     parameters: CompressParams,
     async execute(toolCallId, params, _signal, _onUpdate, ctx): Promise<AgentToolResult<unknown>> {
-      const result = await handleCompress(params as CompressArgs, runtime, ctx, toolCallId);
+      let result: string;
+      try {
+        result = await handleCompress(params as CompressArgs, runtime, ctx, toolCallId);
+      } catch (e) {
+        logThrow("compress", e, { sid: ctx.sessionManager.getSessionId(), ranges: (params as CompressArgs).content?.length ?? 0 });
+        throw e;
+      }
       return { details: undefined, content: [{ type: "text", text: result }] };
     },
   };
@@ -93,6 +99,25 @@ async function handleCompress(args: CompressArgs, runtime: AcpRuntime, ctx: Exte
     activeAfter: applied.state.blocks.filter((b) => b.active).length,
     newBlocks: newBlocks.map((b) => ({ blockId: b.blockId, tier: b.tier, summaryLen: b.summary.length, directMsgCount: b.directMessageIds.length, effectiveMsgCount: b.effectiveMessageIds.length, summary: b.summary })),
   });
+
+  logInfo("compress", {
+    sid: ctx.sessionManager.getSessionId(),
+    event: "applied",
+    ranges: ranges.length,
+    blocksCreated,
+    tokensCompressed,
+    beforeTokens,
+    afterTokens,
+    warnings: warnings.length,
+    errors: errors.length,
+    newBlockIds: newBlocks.map((b) => b.blockId),
+  });
+  if (errors.length > 0) {
+    logError("compress", { sid: ctx.sessionManager.getSessionId(), event: "errors", count: errors.length, errors: errors.slice(0, 5) });
+  }
+  if (warnings.length > 0) {
+    logError("compress", { sid: ctx.sessionManager.getSessionId(), event: "warnings", count: warnings.length, warnings: warnings.slice(0, 5) });
+  }
 
   const lines = [`▣ ACP | ${formatK(beforeTokens)} → ${formatK(afterTokens)} tokens (~${formatK(tokensCompressed)} reclaimed, ${blocksCreated} block${blocksCreated > 1 ? "s" : ""})`];
   if (warnings.length > 0) lines.push("⚠️ " + warnings.join("; "));
