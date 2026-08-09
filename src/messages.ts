@@ -8,6 +8,9 @@ type AnyMessage = {
   content?: unknown;
   toolName?: string;
   toolCallId?: string;
+  command?: string;
+  output?: unknown;
+  summary?: string;
 };
 
 const REF_TAG = new RegExp("^(?:\x3cacp\\s[^>]*\x3em\\d{5}\x3c/acp\x3e|\\[m\\d{1,5}\\])\\s?\\n?");
@@ -72,10 +75,19 @@ function projectMessage(message: AgentMessage, id: string): CoreMessage[] {
     }
     return [{ id, role: "assistant", contentType: "text", text: extractText(msg.content) }];
   }
-  const customText = extractText(msg.content);
+  const customText = extractText(msg.content) || fallbackText(msg);
   return customText.length > 0
     ? [{ id, role: "user", contentType: "text", text: customText }]
     : [];
+}
+
+function fallbackText(msg: AnyMessage): string {
+  const parts: string[] = [];
+  if (msg.command) parts.push(`$ ${msg.command}`);
+  const out = extractText(msg.output);
+  if (out) parts.push(out);
+  if (msg.summary) parts.push(msg.summary);
+  return parts.join("\n").trim();
 }
 
 function stringifyArgs(args: unknown): string {

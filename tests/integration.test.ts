@@ -87,6 +87,29 @@ test("context handler tags every message with a ref even when length matches eve
   assert.ok(firstContent.some((b: any) => b.type === "text" && b.text.includes("m0000")), "first msg ref-tagged");
 });
 
+test("context handler works under omp (oh-my-pi) where sessionManager exposes getBranch() not buildContextEntries()", async () => {
+  const { api, handlers } = captureApi();
+  createAcpExtension({ modelContextLimit: 200_000 })(api as any);
+
+  const entries = [userMsg("e1", "first"), userMsg("e2", "second")];
+  const ctx = {
+    ...fakeCtx(entries, "/tmp/nonexistent-pai-acp-omp.session.json"),
+    sessionManager: {
+      getBranch: () => entries,
+      getSessionId: () => "test-session",
+      getSessionFile: () => "/tmp/nonexistent-pai-acp-omp.session.json",
+    },
+  };
+  const sameLengthMessages = entries.map(() => ({ role: "user", content: "x", timestamp: 0 }));
+
+  const result = await handlers.get("context")![0]!({ type: "context", messages: sameLengthMessages }, ctx);
+  assert.ok(result, "handler must not throw and must return transformed messages under omp");
+  const out = result.messages;
+  assert.equal(out.length, 2);
+  const firstContent = (out[0] as any).content as any[];
+  assert.ok(firstContent.some((b: any) => b.type === "text" && b.text.includes("m0000")), "omp path tags messages with refs");
+});
+
 test("system prompt sources compression rules from acp-kernel (no hardcoded drift, no markers)", () => {
   const { api, handlers } = captureApi();
   createAcpExtension()(api as any);
