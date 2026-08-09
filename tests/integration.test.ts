@@ -110,6 +110,79 @@ test("context handler works under omp (oh-my-pi) where sessionManager exposes ge
   assert.ok(firstContent.some((b: any) => b.type === "text" && b.text.includes("m0000")), "omp path tags messages with refs");
 });
 
+test("omp context handler keeps the current (not-yet-persisted) user message: branch lags event.messages by one", async () => {
+  const { api, handlers } = captureApi();
+  createAcpExtension({ modelContextLimit: 200_000 })(api as any);
+
+  // Simulate omp's real timing: the branch only holds the PREVIOUS turn's
+  // messages (the current user message is persisted only after the LLM call,
+  // in message_end, which omp emits AFTER transformContext → emitContext).
+  const persisted = [userMsg("e1", "first")];
+  const liveMessages = [
+    { role: "user", content: [{ type: "text", text: "first" }], timestamp: Date.now() },
+    { role: "user", content: [{ type: "text", text: "SECOND MESSAGE" }], timestamp: Date.now() },
+  ];
+  const ctx = {
+    ...fakeCtx(persisted, "/tmp/nonexistent-pai-acp-omp-lag.session.json"),
+    sessionManager: {
+      getBranch: () => persisted,
+      getSessionId: () => "test-session",
+      getSessionFile: () => "/tmp/nonexistent-pai-acp-omp-lag.session.json",
+    },
+  };
+
+  const result = await handlers.get("context")![0]!({ type: "context", messages: liveMessages }, ctx);
+  assert.ok(result, "handler must not throw");
+  const out = result.messages;
+  assert.equal(out.length, 2, "the not-yet-persisted current message must survive the transform");
+  const texts = out.map((m: any) =>
+    (Array.isArray(m.content) ? m.content : [{ type: "text", text: m.content }])
+      .filter((b: any) => b.type === "text")
+      .map((b: any) => b.text)
+      .join("\n"),
+  );
+  assert.ok(texts[0]!.includes("first"), "persisted message present");
+  assert.ok(texts[1]!.includes("SECOND MESSAGE"), "live current message present, not dropped");
+  assert.ok(texts[1]!.includes("m0000"), "live message ref-tagged");
+});
+
+test("omp live message keeps the same entry id once persisted (stable refs across turns)", async () => {
+  const { api, handlers } = captureApi();
+  createAcpExtension({ modelContextLimit: 200_000 })(api as any);
+
+  // Turn 1: branch empty (brand-new session), event carries the first message.
+  const turn1Messages = [{ role: "user", content: [{ type: "text", text: "hello" }], timestamp: Date.now() }];
+  const ctx1 = {
+    ...fakeCtx([], "/tmp/nonexistent-pai-acp-omp-stable.session.json"),
+    sessionManager: {
+      getBranch: () => [] as any[],
+      getSessionId: () => "test-session",
+      getSessionFile: () => "/tmp/nonexistent-pai-acp-omp-stable.session.json",
+    },
+  };
+  const r1 = await handlers.get("context")![0]!({ type: "context", messages: turn1Messages }, ctx1);
+  assert.ok(r1);
+  assert.equal(r1.messages.length, 1, "first-ever message must not be dropped");
+
+  // Turn 2: the message is now persisted (with its real entry id), plus a new
+  // not-yet-persisted message. Both must survive; refs must not collide.
+  const persistedTurn2 = [userMsg("e1", "hello")];
+  const turn2Messages = [
+    { role: "user", content: [{ type: "text", text: "hello" }], timestamp: Date.now() },
+    { role: "user", content: [{ type: "text", text: "world" }], timestamp: Date.now() },
+  ];
+  const ctx2 = {
+    ...fakeCtx(persistedTurn2, "/tmp/nonexistent-pai-acp-omp-stable.session.json"),
+    sessionManager: {
+      getBranch: () => persistedTurn2,
+      getSessionId: () => "test-session",
+      getSessionFile: () => "/tmp/nonexistent-pai-acp-omp-stable.session.json",
+    },
+  };
+  const r2 = await handlers.get("context")![0]!({ type: "context", messages: turn2Messages }, ctx2);
+  assert.ok(r2);
+  assert.equal(r2.messages.length, 2, "both persisted and live messages must survive");
+});
 test("system prompt sources compression rules from acp-kernel (no hardcoded drift, no markers)", () => {
   const { api, handlers } = captureApi();
   createAcpExtension()(api as any);
