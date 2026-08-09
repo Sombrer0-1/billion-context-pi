@@ -75,13 +75,22 @@ tokens: countTokens(msg.text ?? "")
 新增 `src/density.ts`，维护实时密度系数 `density`：
 
 ```
-每轮 context 事件：
-  Δreal = realUsage.tokens - prevRealUsage.tokens   // provider 真实增量（差值自动消掉 system+schema 固定开销）
-  Δest  = estimateTokens(coreMessages) - prevEst     // 估算增量
-  if (Δest > 0): instantDensity = Δreal / Δest       // 仅正常增长轮更新
-  density = 0.85×density + 0.15×instantDensity       // EMA 平滑
-  clamp(density, 0.5, 4)                             // 防单轮异常
+每轮 context 事件（推荐：累积锚点法，替代 EMA）：
+  Δreal = realTotal - anchorReal                     // provider 累计真实增量（同窗口）
+  Δest  = estTotal - anchorEst                        // 估算累计增量（同窗口）
+  if (Δest >= 50):                                   // 最小增量阈值，防微消息比值抖动
+    instantDensity = clamp(Δreal / Δest, 0.5, 2.5)
+    density = instantDensity                          // 全量比值，无 EMA 滞后
+    anchorReal = realTotal; anchorEst = estTotal      // 推进锚点
 ```
+
+然后 `createCore({ countTokens: (text) => defaultCountTokens(text) × density })`。
+
+**为什么用累积锚点法而非 EMA**（评审 D1/D2）：EMA 的 α=0.15 在语言切换
+（如中文 1.6 → 英文 0.8）后需 ~20 轮才收敛，期间持续高估 pending；且 Δreal/Δest
+存在 off-by-one 时间错位（realUsage 是上一轮 provider 返回值，estimate 是本轮），
+工具密集轮会产生虚假尖峰。累积锚点法取同一时间窗口的累计增量，天然对齐、
+无滞后、无 α 参数。**可选加固**：连续 2 轮比值在 ±20% 内才采纳，防单轮异常冲击。
 
 然后 `createCore({ countTokens: (text) => defaultCountTokens(text) × density })`。
 
@@ -109,20 +118,30 @@ tokens: countTokens(msg.text ?? "")
 | 压缩那一轮 | Δest 为负 | 跳过（唯一例外） |
 
 到真正触发 nudge 时（可压缩积累到阈值，通常几十轮后），系数早已被几十个样本校准稳定。
-规则仅一条：`if (Δest > 0) 更新 else 跳过`。
+规则：`if (Δest >= 50) 更新 else 跳过`（Δest 为负的压缩轮自然被跳过）。
 
 ## 5. 边界与风险
 
-1. **压缩瞬间 Δest 为负** → 只在 Δest > 0 时更新，压缩后暂停校准一轮
+1. **压缩瞬间 Δest 为负** → `Δest >= 50` 门槛自然跳过；压缩后第一轮正增长可能含残余
+   realUsage（provider 在压缩前返回），建议压缩后设置 flag 再跳过一轮（评审 D7）
 2. **会话开始无 realUsage** → density 初始 1，第二轮起自然收敛
-3. **模型/窗口切换** → `session_start` 重置 density（runtime 已有 `clearNudgeTracking`）
-4. **density clamp [0.5, 4]** → 防单轮巨型纯英文输出拉爆系数
-5. **T2/T3 不受影响** → summary 本身短，CJK-aware 已足够
+3. **模型/窗口切换** → `session_start` 重置 density（runtime 已有 `clearNudgeTracking`）；
+   **mid-session 模型切换**（如 A 模型 → B 模型）也要重置——不同 tokenizer 的 CJK 密度
+   差异巨大（DeepSeek 1.2 vs GPT-4 0.7 vs Claude 0.5），且不同 provider 的 usage 统计
+   口径不同（thinking/cache tokens 是否单列），切换后 density 应重新收敛（评审 D6）
+4. **per-model 存储** → density 不能是 runtime 全局单值，应为 `Map<modelId, number>`
+   （同一个 provider 下有多个模型时各算各的）；并行 session 也要隔离，key 到
+   `sessionId × modelId` 粒度（评审 D5）
+5. **density clamp [0.5, 2.5]** → 上界从 4 收紧：没有自然语言能达到 4 token/char，
+   即使 CJK+emoji 混合也不超过 2.5；下界 0.5 给纯英文留余量（评审 D3）
+6. **最小 Δest 阈值 = 50** → 微消息（1-2 字符）的比值极不稳定（评审 D4）
+7. **T2/T3 不受影响** → summary 本身短，CJK-aware 已足够
 
 ## 6. 验证方式
 
 1. 单测：构造中英混合消息，断言 pending = countTokens 口径而非 chars/4
-2. 密度模块单测：喂模拟 usage 序列，验证 EMA 收敛 + clamp + 负增量跳过
+2. 密度模块单测：喂模拟 usage 序列，验证锚点法收敛 + clamp [0.5,2.5] + 最小 Δest 门槛 +
+   负增量跳过 + 模型切换重置
 3. 集成：本会话复现 —— 方案后 `acp_status` 的 max compressible ≈ 64K（≥50K，nudge 触发），
    与 footer 18% 口径自洽
 
@@ -164,17 +183,19 @@ tokens: countTokens(msg.text ?? "")
 - 或者更简单：把 `estimateMessageTokens` 的实现直接改成 `countTokens` 语义（但它是模块级函数，无 ctx 访问权，需传参）
 
 **adapter 改动（本仓库）**：
-- 新建 `src/density.ts`：EMA 密度估计器（Δreal/Δest、clamp、负增量跳过、session_start 重置）
+- 新建 `src/density.ts`：累积锚点密度估计器（Δreal/Δest 同窗口、clamp [0.5,2.5]、
+  最小 Δest=50 门槛、压缩后跳过一轮、per-model Map 存储、模型切换重置）
 - `src/runtime.ts`：`createCore({ countTokens: (t) => defaultCountTokens(t) × density })`
 - `src/index.ts` context 事件：更新 density（每轮）；tokenCount 逻辑不变
 - `src/compress-tool.ts` / `src/status-tool.ts`：beforeTokens/breakdown 统一走校准口径（可选，显示层）
 
 ### 待确认问题（实现阶段）
 
-- [ ] density 的 EMA 参数（0.85/0.15）是否需要暴露到 adapter config？
+- [ ] 累积锚点法是否需要"连续 2 轮 ±20% 才采纳"加固？（防单轮异常冲击，评审建议可选）
 - [ ] `acp_status` breakdown 显示是否也要乘 density？（显示层一致性 vs 模型可读性）
 - [ ] 压缩块 summary 的 T2/T3 pending 是否也应该乘 density？（目前方案：不乘，CJK-aware 足够）
 - [ ] `computeProtectedRefs` 的 preserveRecentTokens 改用 countTokens 后，保护区大小变化是否影响行为？
+- [ ] density 按 `sessionId × modelId` 粒度存储，runtime 如何拿到 modelId？（ctx 是否暴露）
 
 ## 9. 问题溯源（哪些关键问题由用户提出）
 
@@ -191,3 +212,26 @@ tokens: countTokens(msg.text ?? "")
    第二轮起每轮都能喂样本 → 消除了"预热期"设计（§4）。
 4. **"把根因写上，文档里我的问题要注明"**（2026-08）：要求根因显式化 + 问题归属标注
    （本修订）。
+5. **"中英文 chars/token 比例不同模型差异大"**（2026-08）：用户指出不同模型 tokenizer
+   密度差异（DeepSeek 1.2 vs GPT-4 0.7 vs Claude 0.5），差值法虽自适应，但需 per-model
+   存储 + 切换重置 → 补充 §5.3/§5.4（本修订）。
+
+## 10. 独立评审记录（MiMo-V2.5-Pro，2026-08）
+
+评审结论：**有条件通过**。方案方向正确，差值法原理成立，但发现 3 个中风险缺陷 + 4 个
+低风险加固项，均已纳入本方案：
+
+| # | 缺陷 | 处置 |
+|---|------|------|
+| D1 | Δreal/Δest 时间错位（off-by-one），工具密集轮虚高 | §3.2 改用累积锚点法 |
+| D2 | EMA α=0.15 粘滞，语言切换 ~20 轮才收敛 | §3.2 锚点法无 α 参数 |
+| D3 | clamp 上界 4 过宽 | §5.5 收紧 [0.5, 2.5] |
+| D4 | 无最小 Δest 阈值 | §5.6 加 ≥50 门槛 |
+| D5 | 并行 session 共享 density | §5.4 per-session×model 存储 |
+| D6 | mid-session 模型切换不重置 | §5.3 监听 model 变化重置 |
+| D7 | 压缩后第一轮正增长含残余 usage | §5.1 压缩后 flag 跳过一轮 |
+
+评审还建议：**Phase 1（kernel 修复）独立先行**——仅把 `buildCompressibleRanges` 改用
+CJK-aware countTokens 就解决 80% 问题（0.25 → 1.0 tok/char，改善 4 倍），零风险可独立
+PR；density 系数只是校准残余 ~20% 误差。实施顺序：Phase 1 kernel → Phase 2 adapter
+density → Phase 3 显示层。完整评审见 `/tmp/token-calibration-review.md`。
