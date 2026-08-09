@@ -5,6 +5,7 @@ import {
   capToolOutput,
   detectBashTimeout,
   appendTimeoutNotice,
+  isBashToolResult,
 } from "../src/tool-guardrails.js";
 import type { ToolResultEvent } from "@earendil-works/pi-coding-agent";
 
@@ -121,4 +122,14 @@ test("appendTimeoutNotice adds a new text part when content has no text part", (
   const out = appendTimeoutNotice([img], 30);
   assert.equal(out.length, 2);
   assert.equal(out[1].type, "text");
+});
+
+test("isBashToolResult narrows by toolName and exposes bash details (vendored guard, host-agnostic)", () => {
+  const bash = { toolName: "bash", content: text("ok"), isError: false, details: { fullOutputPath: "/tmp/x" } } as unknown as ToolResultEvent;
+  const other = { toolName: "read", content: text("ok"), isError: false } as unknown as ToolResultEvent;
+  assert.equal(isBashToolResult(bash), true);
+  assert.equal(isBashToolResult(other), false);
+  if (isBashToolResult(bash)) {
+    assert.equal(bash.details?.fullOutputPath, "/tmp/x");
+  }
 });
