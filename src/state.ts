@@ -66,6 +66,7 @@ function mergeInitialState(parsed: CompressionState): CompressionState {
   return {
     blocks: parsed.blocks ?? fresh.blocks,
     messageRefs: parsed.messageRefs ?? fresh.messageRefs,
+    tokenSnapshot: parsed.tokenSnapshot ?? fresh.tokenSnapshot,
     nudge: { ...fresh.nudge, ...(parsed.nudge ?? {}) },
     stats: { ...fresh.stats, ...(parsed.stats ?? {}) },
     nextBlockId: parsed.nextBlockId ?? fresh.nextBlockId,
