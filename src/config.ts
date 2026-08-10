@@ -26,7 +26,7 @@ export interface AdapterConfig {
   /** How to display delegate usage in session totals.
    *  "merged" — delegate usage is added to main session totals (Pi default).
    *  "separate" — delegate usage is tracked separately, displayed in
-   *               system notifications and /session command.
+   *               system notifications (excluded from main session totals).
    *  Default: "separate" */
   displayUsage?: "merged" | "separate";
   /** Default timeout in seconds injected into the bash tool when the model

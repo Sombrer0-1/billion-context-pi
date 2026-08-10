@@ -25,6 +25,10 @@ export interface UsageUpdateEvent {
   usage: Usage;
 }
 
+export interface AgentSettledEvent {
+  kind: "agent-settled";
+}
+
 function safeNumber(v: unknown): number | undefined {
   return typeof v === "number" && Number.isFinite(v) ? v : undefined;
 }
@@ -115,7 +119,8 @@ export type ParsedEvent =
   | ThinkingEndEvent
   | RetryStartEvent
   | RetryEndEvent
-  | UsageUpdateEvent;
+  | UsageUpdateEvent
+  | AgentSettledEvent;
 
 export interface ThinkingEndEvent {
   kind: "thinking-end";
@@ -236,6 +241,9 @@ export function parseEventLine(line: string): ParsedEvent | null {
   }
   if (e.type === "message_end") {
     return handleMessageEnd(e);
+  }
+  if (e.type === "agent_settled") {
+    return { kind: "agent-settled" };
   }
   return null;
 }

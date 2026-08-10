@@ -2,6 +2,8 @@ import type { ExtensionCommandContext, RegisteredCommand } from "@earendil-works
 import type { AcpRuntime } from "./runtime.js";
 import { defaultCountTokens, parseBlockIdArg, collectBlockContent, formatRanges } from "acp-kernel";
 import { getSystemPromptText } from "./compat.js";
+import { getDelegateUsage } from "./delegate-tool.js";
+import { formatCompactTokens } from "./footer-status.js";
 
 declare const CURRENT_VERSION: string;
 
@@ -19,7 +21,7 @@ export function makeCommands(runtime: AcpRuntime): Array<{ name: string; options
     {
       name: "acp-status",
       options: {
-        description: "Detailed ACP status (block tiers, token breakdown).",
+        description: "Detailed ACP status (block tiers, token breakdown, delegate usage).",
         handler: async (_args, ctx) => ctx.ui.notify(await statusReport(runtime, ctx)),
       },
     },
@@ -73,9 +75,7 @@ export function makeCommands(runtime: AcpRuntime): Array<{ name: string; options
 }
 
 function fmtTokens(n: number): string {
-  if (n >= 1000000) return `${(n / 1000000).toFixed(1)}M`;
-  if (n >= 1000) return `${(n / 1000).toFixed(1)}K`;
-  return String(n);
+  return formatCompactTokens(n);
 }
 
 function bar(value: number, total: number, width: number = 20): string {
@@ -185,6 +185,15 @@ async function statusReport(runtime: AcpRuntime, ctx: ExtensionCommandContext): 
     lines.push("Blocks: none (nothing compressed yet)");
   }
 
+  lines.push("");
+  const delegateUsage = getDelegateUsage();
+  if (delegateUsage && delegateUsage.totalTokens > 0) {
+    lines.push("");
+    const cost = delegateUsage.cost.total;
+    const costStr = cost > 0 ? ` ($${cost.toFixed(4)})` : "";
+    lines.push("── Session delegate usage (excluded from main totals) ──");
+    lines.push(`Tokens: ${delegateUsage.input.toLocaleString()} in, ${delegateUsage.output.toLocaleString()} out (${delegateUsage.totalTokens.toLocaleString()} total)${costStr}`);
+  }
   lines.push("");
   lines.push("Tag visibility: tags injected to LLM only (deep copy), not persisted in session, not shown in terminal.");
 

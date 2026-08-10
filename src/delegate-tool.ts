@@ -22,6 +22,7 @@ import { isPiHost } from "./runtime.js";
 const MAX_DEPTH = 2;
 const SYNC_TIMEOUT_MS = 5 * 60_000;
 const EOF_GRACE_MS = 10_000;
+const SETTLED_GRACE_MS = 10_000;
 const IDLE_GRACE_MS = 5 * 60_000;
 const ASYNC_TIMEOUT_MS = 30 * 60_000;
 const KILL_GRACE_MS = 10_000;
@@ -367,7 +368,7 @@ export function makeDelegateWaitTool(_pi: ExtensionAPI): ToolDefinition<typeof W
       }
       // Already finished (e.g. the model calls wait after the injected
       // notification, or the run was cancelled).
-      const displayMode = (_pi as unknown as Record<string, unknown>).displayUsage as "merged" | "separate" ?? "separate";
+      const displayMode = ((_pi as unknown as Record<string, unknown>).displayUsage ?? "separate") as "merged" | "separate";
       if (run.status === "cancelled") {
         run.consumed = true;
         return buildWaitResult(run, `Delegate \`${args.runId}\` was cancelled (no result).${remainingLineForWait(args.runId)}`, displayMode);
@@ -421,10 +422,12 @@ export function makeDelegateWaitTool(_pi: ExtensionAPI): ToolDefinition<typeof W
             // Same message as the cancel-then-wait early-return path, for consistency.
             // Don't go through formatRunResult — cancelled runs have no result, and
             // formatPayload would render a misleading "could not be persisted" line.
-            finish(buildWaitResult(run, `Delegate \`${run.runId}\` was cancelled (no result).${remainingLineForWait(run.runId)}`));
+            // Partial usage (if any) is accumulated per displayMode like the
+            // early-return path.
+            finish(buildWaitResult(run, `Delegate \`${run.runId}\` was cancelled (no result).${remainingLineForWait(run.runId)}`, displayMode));
             return;
           }
-          finish(buildWaitResult(run, formatRunResult(run)));
+          finish(buildWaitResult(run, formatRunResult(run), displayMode));
         };
         signal?.addEventListener("abort", onAbort);
         timer = setTimeout(
@@ -463,7 +466,7 @@ export function makeDelegateCancelTool(_pi: ExtensionAPI): ToolDefinition<typeof
         logError("delegate", { event: "cancel-kill-error", runId, error: String(err) });
       }
       delegateStatusWidget.poke();
-      const displayMode = (_pi as unknown as Record<string, unknown>).displayUsage as "merged" | "separate" ?? "separate";
+      const displayMode = ((_pi as unknown as Record<string, unknown>).displayUsage ?? "separate") as "merged" | "separate";
       return buildCancelResult(run, `Cancelled ${runId} (${run.agent}).`, displayMode);
     },
   };
@@ -582,6 +585,11 @@ async function runDelegate(
         flushThinking();
         return;
       }
+      if (ev.kind === "agent-settled") {
+        flushThinking();
+        watchdog.settledGrace(SETTLED_GRACE_MS, KILL_GRACE_MS, "agent settled but process did not exit");
+        return;
+      }
       if (ev.kind === "reply-delta") {
         flushThinking();
         replyText += ev.delta;
@@ -692,8 +700,11 @@ async function runDelegate(
             delegateStatusWidget.poke();
             return;
           }
-          const mode = (pi as unknown as Record<string, unknown>).displayUsage as "merged" | "separate" ?? "separate";
-          const injected = injectResult(pi, args.agent, runId, args.task, code, file, run.timedOut, run.usage, mode);
+          const mode = ((pi as unknown as Record<string, unknown>).displayUsage ?? "separate") as "merged" | "separate";
+          const injected = injectResult(pi, args.agent, runId, args.task, code, file, run.timedOut, run.usage, mode, run.usageReported);
+          if (injected && run.usage && !run.usageReported) {
+            run.usageReported = true;
+          }
           run.injected = injected;
           debug.event("delegate-done", { runId, code, status: run.status, injected, outLen: output.length, file });
           logInfo("delegate", { event: "done", runId, agent: args.agent, code, status: run.status, injected, outLen: output.length, file });
@@ -866,7 +877,7 @@ function formatSyncResult(agent: string, runId: string, task: string, r: ChildRe
   return formatPayload(header, file, task, body);
 }
 
-function injectResult(
+export function injectResult(
   pi: ExtensionAPI,
   agent: string,
   runId: string,
@@ -876,6 +887,7 @@ function injectResult(
   timedOut?: string,
   usage?: Usage,
   mode: "merged" | "separate" = "separate",
+  usageAlreadyReported?: boolean,
 ): boolean {
   const send = pi.sendUserMessage;
   if (typeof send !== "function") {
@@ -898,7 +910,11 @@ function injectResult(
   let usageNote = "";
   
   if (mode === "separate") {
-    // In separate mode, show cumulative delegate usage
+    // In separate mode, accumulate this run's usage first (unless it was
+    // already reported via a wait/cancel), then show the cumulative total.
+    if (usage && !usageAlreadyReported) {
+      addDelegateUsage(usage);
+    }
     const totalUsage = getDelegateUsage();
     if (totalUsage) {
       const cost = totalUsage.cost.total;

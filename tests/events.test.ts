@@ -195,3 +195,14 @@ test("accumulateUsage returns b when a is undefined", async () => {
   const result = accumulateUsage(undefined, b);
   assert.deepEqual(result, b);
 });
+
+test("parses agent_settled event", () => {
+  const ev = parseEventLine('{"type":"agent_settled"}');
+  assert.deepEqual(ev, { kind: "agent-settled" });
+});
+
+test("activityLines ignores agent-settled events", () => {
+  const ev = { kind: "agent-settled" as const };
+  assert.deepEqual(activityLines(ev, { showThinking: false }), []);
+  assert.deepEqual(activityLines(ev, { showThinking: true }), []);
+});
