@@ -328,3 +328,71 @@ nudge 从不触发——这正是要修的问题。Phase 1（CJK-aware countToke
 **结论：保持 MIN_DELTA_EST=50。** 本会话 1.07 最终收敛正确，正是门槛 + C1 确认
 机制配合的结果。若未来需要加速收敛，优先考虑自适应门槛
 （`max(20, density × 系数)`），而非全局下调。
+
+## 11. 标签 token 数快照化（修复 density 校准期缓存重建，2026-08-10 提出）
+
+### 11.1 问题：density 校准期 → 前缀缓存反复重建
+
+**现象**：重启 pi 后（session_start 重置 density=1），校准期 density 大幅震荡
+（实测：`1 → 1.9358 → 1.1743 → 2.3714 → 1.8740 → … → 收敛 1.4977`），pi 界面
+出现多次"缓存重建"（DeepSeek prompt cache miss）。
+
+**根因链**：
+1. `render-refs.ts:renderMessage` **每轮对所有消息**：剥离旧 `<acp>` 标签 → 用
+   `ctx.countTokens`（**带 density 的实时估算**）重新计算 → 重打标签
+2. density 校准期每轮变化 → **所有历史消息的 `<acp tokens="X">` 数字每轮变化**
+3. 消息文本变化 → 请求前缀与上一轮不同 → DeepSeek 前缀缓存整条 miss → 重建
+4. 收敛后（density 稳定）标签不再变化 → 缓存恢复命中（与实测吻合：收敛后无重建）
+
+**关键事实**：标签只是渲染给模型的元数据（提示消息大小），**不参与压缩决策**
+（pending/压缩范围用 state 内的 countTokens 计算，不经标签文本）。所以标签
+token 数**不需要每轮跟随 density 重算**。
+
+### 11.2 方案 A：标签 token 数快照化（推荐）
+
+**思路**：token 数在消息**首次渲染时确定并存入 state**，之后永远读快照，不随
+density 重算。
+
+改动点（acp-kernel）：
+1. `types.ts`：`MessageRefMap` 增加 `tokens: Record<string, number>`（key = message id）
+2. `render-refs.ts`：`renderMessage` 改为——strip 旧标签后，从快照读 token
+   （无则用当前 countTokens 计算**并写入快照**）
+3. `state.ts`：初始化空 map（随 state 持久化到 `.acp.json`，跨重启稳定）
+
+**效果**：
+- 标签在消息写入时用"当时的 density"算一次 → **之后永久稳定**
+- density 收敛期标签不再变化 → 前缀稳定 → **缓存只 miss 一次（重启首轮），
+  不再每轮重建**
+- 新消息（density 收敛后写入）标签用收敛值，**精度不损失**
+- 旧消息标签是历史快照（可能在 density=1 时写入而低估）——稳定优先，可接受
+
+**成本**：kernel 结构小改 + 测试更新。跨重启持久化后重启也不重算。
+
+### 11.3 备选方案对比
+
+| 维度 | A（快照） | C（render/决策分离） | E（收敛期冻结） |
+|---|---|---|---|
+| 根治缓存重建 | ✅ 只 miss 一次 | ✅ 零 miss（标签恒定） | ⚠️ 仍 miss 一次 |
+| 标签精度 | ✅ 新消息保留校准 | ❌ 永远低估 | ⚠️ 收敛后才有 |
+| 改动量 | 中（kernel state+render） | 小（换固定函数） | 最小 |
+| 副作用 | 旧消息标签是历史快照 | 标签不准 | 校准变慢 |
+
+- **方案 C**：render-refs 打标签改用不含 density 的固定估算（defaultTokens），
+  density 只用于决策路径。改动最小但标签永远不校准（中文消息低估，仅影响展示）。
+- **方案 E**：density 在确认（±20% 连续 2 轮）前保持 1，确认后一次应用。从
+  "每轮重建"变"一次重建"，不彻底且拖慢校准。
+
+**推荐 A**：唯一"既根治又不牺牲精度"的方案——快照让旧消息稳定（缓存友好）、
+新消息精确（校准受益），两者兼得。
+
+### 11.4 验证方式
+
+1. 单测：同一消息用 density=1 和 density=2 各 render 一次 → 标签 token 数一致
+2. 集成：模拟 density 1→2 收敛 5 轮 → 断言标签不变、前缀稳定
+3. 真实会话：重启后校准期观察缓存 miss 次数（应只有 1 次）
+
+### 11.5 PR 归属
+
+- kernel 侧（render-refs + types + state）：新 acp-kernel PR（#51 已建，独立改动）
+- adapter 侧：基本无改动（快照在 kernel 内完成），如有配置开关则进 #97
+- 关联：issue #96（同属校准副作用修复）
