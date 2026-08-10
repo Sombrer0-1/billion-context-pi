@@ -1,4 +1,4 @@
-import { test } from "node:test";
+import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { promises as fs } from "node:fs";
 import * as path from "node:path";
@@ -15,6 +15,20 @@ async function writeConfig(dir: string, data: object): Promise<string> {
   await fs.writeFile(filePath, JSON.stringify(data), "utf8");
   return filePath;
 }
+
+let savedHome: string | undefined;
+let hookHome: string;
+
+before(async () => {
+  savedHome = process.env.HOME;
+  hookHome = await fs.mkdtemp(path.join(os.tmpdir(), "acp-home-"));
+  process.env.HOME = hookHome;
+});
+
+after(async () => {
+  process.env.HOME = savedHome;
+  await fs.rm(hookHome, { recursive: true, force: true });
+});
 
 test("loadUserConfig returns empty object when no config files exist", async () => {
   const cwd = path.join(os.tmpdir(), `acp-test-${Date.now()}`);
