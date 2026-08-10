@@ -1,6 +1,7 @@
 import type { ExtensionCommandContext, RegisteredCommand } from "@earendil-works/pi-coding-agent";
 import type { AcpRuntime } from "./runtime.js";
 import { defaultCountTokens, parseBlockIdArg, collectBlockContent, formatRanges } from "acp-kernel";
+import { getSystemPromptText } from "./compat.js";
 
 declare const CURRENT_VERSION: string;
 
@@ -103,7 +104,7 @@ async function statusReport(runtime: AcpRuntime, ctx: ExtensionCommandContext): 
   // the real system prompt (measured) and the rest (tool schemas + the
   // inevitable chars/4-vs-real-tokenizer drift).
   const classified = bd ? bd.system + bd.tool + bd.summaries + bd.code + bd.text : 0;
-  const systemPromptText = ctx.getSystemPrompt?.() ?? "";
+  const systemPromptText = getSystemPromptText(ctx);
   const systemPromptTokens = systemPromptText ? defaultCountTokens(systemPromptText) : 0;
   const framework = bd ? Math.max(0, tokenCount - classified - systemPromptTokens) : 0;
   const displayTotal = tokenCount;

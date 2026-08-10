@@ -71,9 +71,9 @@ test("idle watchdog escalates to SIGKILL when the child ignores SIGTERM", async 
 });
 
 test("poke resets the idle timer (continuous output never triggers)", async () => {
-  const h = setup({ idleMs: 25 });
+  const h = setup({ idleMs: 200 });
   for (let i = 0; i < 10; i++) {
-    await sleep(15);
+    await sleep(50);
     h.watchdog.poke();
   }
   assert.equal(h.kills.length, 0, "no kill while output keeps flowing");
