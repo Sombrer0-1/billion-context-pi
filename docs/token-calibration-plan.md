@@ -444,7 +444,8 @@ mergeInitialState 一行 + 测试更新。跨重启持久化后重启也不重�
 1. 单测：同一消息用 density=1 和 density=2 各 render 一次 → 标签 token 数一致
 2. 集成：模拟 density 1→2 收敛 5 轮 → 断言标签不变、前缀稳定
 3. **旧 `.acp.json`（无 `tokenSnapshot` 字段）加载后不报错、快照为 `{}`**（F1）
-4. **`assignRefs` 多轮运行后 `tokenSnapshot` 仍在**（F2 回归守卫）
+4. **`processTurn` 多轮运行后 `tokenSnapshot` 仍在**（assignRefs 覆盖 ref 分配
+   不吞快照 + sync-blocks 覆盖重建不丢快照，F2/G1/G4 回归守卫，吸收 H2）
 5. 真实会话：重启后校准期观察缓存 miss 次数（应只有 1 次）
 
 ### 11.6 PR 归属
@@ -513,3 +514,18 @@ build 发布（billion-context-pi 的 AGENTS.md 已规范：acp-kernel 必须先
 | G4 | Minor | processTurn 返回 turn.state、adapter save 的链路本身 OK | ✅ 验证清单补"连续两轮 processTurn 后 tokenSnapshot 仍在"（11.5 第 4 条已覆盖 assignRefs，补 sync-blocks 场景） |
 | G5 | Major | `renderVisibleRefs` 改返回类型是 breaking change | ✅ §11.2 改为保留旧签名 + 内部 `renderWithSnapshot()`（与 §11.8 下游分析一致） |
 | G6 | Nit | 文档写的 run 返回 state 与现状不一致（现状 run 不更新 state） | ✅ §11.2 标注"目标态，非现状" |
+
+### 11.10 第三轮审阅闭环（最终验收，mimo-v2.5-pro，2026-08-10）
+
+> 结论：**可实施**。全量扫描确认无第三个遗漏的 state 重建点（kernel 5 +
+> adapter 1 = 6 个构造点全覆盖）；G1/G2 shallow clone 修复正确安全（值为
+> primitive，无共享引用，拷贝量可忽略）；文档自洽。
+
+| # | 严重度 | 内容 | 处置 |
+|---|---|---|---|
+| H1 | Major（实为澄清） | adapter `mergeInitialState` 是第 6 个构造点，手动拼 6 字段缺 tokenSnapshot | ✅ 已被 §11.2 改动点 6 覆盖，非遗漏 |
+| H2 | Nit | §11.5 第 4 条只提 assignRefs，与 §11.9 G4"补 sync-blocks 场景"不一致 | ✅ 11.5 第 4 条已改为"processTurn 多轮运行后 tokenSnapshot 仍在"（覆盖 assignRefs + sync-blocks） |
+| H3 | Minor（优化，非阻塞） | 快照全命中时仍写回新 state → 每轮无谓 save（JSON.stringify + 磁盘写） | ✅ 采纳为实现时优化：`createRenderRefsNode.run` 仅当快照有新增条目才写回 state（`Object.keys(snapshot).length !== Object.keys(prev).length`），稳态零 I/O |
+| H4 | — | 第三个重建点排查：prune/filter/hideCompressCalls/recommend/nudge/emergencyTruncate/applyCompression/hideConsumedCompressCalls/prune 逐一排除，均只改 messages 或 spread 保留 | ✅ 确认无遗漏 |
+| H5 | — | G1/G2 shallow clone 验证：`{ ...(state.tokenSnapshot ?? {}) }` 值 primitive 无共享引用；syncBlocks 每轮 ~32KB 拷贝、cloneState 更低频，均可忽略 | ✅ 方案正确 |
+| H6 | — | 文档自洽：§11.2 vs §11.8 的 renderVisibleRefs 表述一致；无旧表述残留；G6"目标态"标注在位 | ✅ 自洽 |
