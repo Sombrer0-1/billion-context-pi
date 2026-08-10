@@ -1,11 +1,51 @@
 # Token Calibration — 让 pending 计算对齐 provider 真实 token
 
 > 分支：`feat/token-calibration`（worktree: `/Users/yintianan/GitHub/billion-context-pi-wt2`）
-> 状态：**研究阶段（draft）** — 方案讨论中，尚未实现
+> 状态：**已实现 + 真实会话验证**（Phase 1/2 + §11 快照化，详见 §10/§11）
 > 实测环境：**DeepSeek V4-Flash**（1M 窗口）。其 tokenizer 中英文密度差异大
 > （官方：1 英文字符 ≈ 0.3 token、1 中文字符 ≈ 0.6 token，中文密度为英文 2 倍；
 > 实测 1 汉字 ≈ 1.2-1.3 token），chars/4 估算对中文内容严重低估 —— 本方案的
 > 校准系数正是为此而设。
+
+---
+
+## 0. TL;DR（大白话，先看这个）
+
+### 要解决的问题
+
+系统"以为"的上下文大小，和实际花的 token 数对不上。
+压缩提示靠 `chars/4` 估算 token（1 字符 = 0.25 token）——对英文大致行，但**中文
+1 字符实际 ≈ 1 token，被低估 2-4 倍**。后果：上下文已占窗口 18%，系统却觉得
+"才 4 万，没到 5 万阈值"**一直不提示压缩**。就像体重秤显示 60 公斤、实际 90 公斤。
+
+### 为什么不能直接看 provider 的真实数字
+
+1. provider 只给**总数**（"这轮 18 万 token"），不给分类——不知道里面哪些是旧
+   工具输出（可压缩）、哪些是刚说的几句话（要保护）
+2. 压缩提示必须在**发请求之前**决定（要写进请求里），而真实数字是请求**之后**
+   才知道的
+3. 压缩动作会让总数瞬间暴跌，拿它当"增长量"会误判
+
+所以必须自己估算每个部分，再用真实总数**校准**估算误差。
+
+### 修改方案（三个阶段）
+
+- **Phase 1（内核，acp-kernel）**：把写死的 `chars/4` 换成可注入的 token 计数器，
+  让"可压缩量"计算用上准确的中文感知算法
+- **Phase 2（适配器，billion-context-pi）**：密度校准器——每轮用"真实增量 ÷ 估算
+  增量"算当前会话的换算系数（density）乘到估算上。中文多的会话系数自动变高，
+  英文少的变低，完全自适应
+- **§11（标签快照化）**：修衍生 bug——校准期 density 每轮变 → 消息 `<acp>` 标签
+  数字每轮重算 → 缓存前缀变 → 整条缓存反复失效（界面反复"缓存重建"）。方案：
+  标签数字在消息**首次出现时定死存入 state**，之后永不重算
+
+### 现状
+
+已实现 + 真实会话验证通过（nudge 正常触发、density 收敛、缓存重建待 kernel 发布后修复）。
+关联 PR：acp-kernel [#51](https://github.com/ranxianglei/acp-kernel/pull/51)、
+billion-context-pi [#97](https://github.com/ranxianglei/billion-context-pi/pull/97)。
+
+---
 
 ## 1. 问题
 
