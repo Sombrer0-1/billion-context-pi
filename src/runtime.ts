@@ -1,4 +1,4 @@
-import type { ExtensionContext, SessionEntry } from "@earendil-works/pi-coding-agent";
+import type { ExtensionContext, SessionEntry, SessionMessageEntry } from "@earendil-works/pi-coding-agent";
 import {
   createCore,
   defaultCountTokens,
@@ -9,6 +9,7 @@ import {
 import { resolveConfig, type AdapterConfig } from "./config.js";
 import { entriesToCoreMessages } from "./messages.js";
 import { SessionStateStore } from "./state.js";
+import { logInfo, logWarn } from "./log.js";
 
 // pi exposes `sessionManager.buildContextEntries()`; omp (oh-my-pi) only has
 // `getBranch()`. Both return chronological SessionEntry[]; feature-detect so the
@@ -17,6 +18,8 @@ type SessionEntrySource = {
   buildContextEntries?: () => SessionEntry[];
   getBranch?: () => SessionEntry[];
 };
+
+type AgentMessage = SessionMessageEntry["message"];
 
 export function readContextEntries(sm: ExtensionContext["sessionManager"]): SessionEntry[] {
   const source = sm as unknown as SessionEntrySource;
@@ -48,9 +51,63 @@ export interface AcpRuntime {
   clearNudgeTracking(): void;
   liveContextLimit(ctx: ExtensionContext): number;
   configFor(ctx: ExtensionContext): Config;
-  stateFor(ctx: ExtensionContext): Promise<{ state: CompressionState; coreMessages: ReturnType<typeof entriesToCoreMessages>; entries: SessionEntry[] }>;
+  stateFor(ctx: ExtensionContext, liveMessages?: AgentMessage[]): Promise<{ state: CompressionState; coreMessages: ReturnType<typeof entriesToCoreMessages>; entries: SessionEntry[] }>;
   save(state: CompressionState, ctx: ExtensionContext): Promise<void>;
   acquireLock(sid: string): Promise<() => void>;
+}
+
+// omp fires the context event before the current user message is persisted to
+// the session branch (its agent-loop emits message_end only after
+// prepareProviderCall → transformContext), so getBranch() lags one message
+// behind. Merge event.messages — the exact messages about to be sent,
+// including the not-yet-persisted tail — with the persisted branch records:
+// matching messages keep their stable entry id (so kernel refs survive once
+// the message is persisted on the next turn), unmatched tail messages get
+// `live-N` ids until they are persisted.
+function mergeLiveEntries(entries: SessionEntry[], live: AgentMessage[]): SessionEntry[] {
+  const persisted = entries.filter((e): e is SessionMessageEntry => e.type === "message");
+  const out: SessionEntry[] = [];
+  let p = 0;
+  let unmatched = 0;
+  for (let i = 0; i < live.length; i++) {
+    const msg = live[i]!;
+    let matched: SessionMessageEntry | undefined;
+    let j = p;
+    while (j < persisted.length && persisted[j]!.message.role !== msg.role) j++;
+    if (j < persisted.length && sameMessage(persisted[j]!.message, msg)) {
+      matched = persisted[j]!;
+      p = j + 1;
+    }
+    if (matched) {
+      out.push(matched);
+    } else {
+      unmatched++;
+      out.push({
+        type: "message",
+        id: `live-${i}`,
+        parentId: null,
+        timestamp: String(msg.timestamp ?? Date.now()),
+        message: msg,
+      });
+    }
+  }
+  if (unmatched > 0) logInfo("runtime", { event: "merge-live-entries", live: live.length, unmatched });
+  return out;
+}
+
+function sameMessage(a: AgentMessage, b: AgentMessage): boolean {
+  const ra = (a as { role?: string }).role;
+  const rb = (b as { role?: string }).role;
+  if (ra !== rb) return false;
+  const ca = (a as { content?: unknown }).content;
+  const cb = (b as { content?: unknown }).content;
+  if (ca === undefined || cb === undefined) return false;
+  try {
+    return JSON.stringify(ca) === JSON.stringify(cb);
+  } catch (e) {
+    logWarn("runtime", { event: "message-compare-failed", error: e instanceof Error ? e.message : String(e) });
+    return a === b;
+  }
 }
 
 export function createRuntime(adapter: AdapterConfig): AcpRuntime {
@@ -87,11 +144,20 @@ export function createRuntime(adapter: AdapterConfig): AcpRuntime {
     return resolveConfig(adapterRef, liveContextLimit(ctx));
   }
 
-  async function stateFor(ctx: ExtensionContext) {
+  async function stateFor(ctx: ExtensionContext, liveMessages?: AgentMessage[]) {
     const sm = ctx.sessionManager;
     const state = await store.load(sm.getSessionFile() ?? undefined, sm.getSessionId());
     const entries = readContextEntries(sm);
-    return { state, coreMessages: entriesToCoreMessages(entries), entries };
+    // omp fires the context event BEFORE the current user message is persisted
+    // to the session branch (its agent-loop emits message_end only after
+    // prepareProviderCall → transformContext), so getBranch() lags one message
+    // behind and the current prompt would be dropped from the rebuilt context.
+    // pi appends user messages to the session before the LLM call, so its
+    // buildContextEntries() is always current. Merge event.messages (the exact
+    // messages about to be sent, including the not-yet-persisted tail) with the
+    // persisted branch records on the omp path only.
+    const merged = isPiHost(sm) || !liveMessages || liveMessages.length === 0 ? entries : mergeLiveEntries(entries, liveMessages);
+    return { state, coreMessages: entriesToCoreMessages(merged), entries: merged };
   }
 
   async function save(state: CompressionState, ctx: ExtensionContext) {
