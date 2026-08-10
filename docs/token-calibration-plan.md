@@ -455,3 +455,33 @@ mergeInitialState 一行 + 测试更新。跨重启持久化后重启也不重�
 | F5 | Minor | 内容重写后快照不失效 | ⚠️ 明确不做（与根治冲突），记入 trade-off（11.3） |
 | F6 | Nit | 方案 C "永远低估"表述过强 | ✅ 11.4 修正为"不随 density 校准（差 10-30%）" |
 | F7 | Nit | 未点出 assignRefs 需保留 | ✅ 11.6 说明快照顶层化后 assignRefs 无需改动 |
+
+### 11.8 下游兼容性分析（2026-08-10 调查）
+
+**acp-kernel 下游使用者（共 3 个，全部 ranxianglei 自家生态）**：
+
+| 项目 | 类型 | devDeps 版本 | 依赖方式 |
+|---|---|---|---|
+| billion-context-pi（本项目） | Pi adapter（in-process） | acp-kernel 0.0.17 | tsup 无 external 配置 → 默认 inline |
+| billion-context | 通用 proxy（Claude Code/Codex/Cursor/Aider） | acp-kernel 0.0.17 | tsup `noExternal: ["acp-kernel", ...]` 明确 inline |
+| pai-acp | Pi 生态 in-process host | acp-kernel 0.0.16 | tsup external 只列 pi 包（@earendil-works/pi-*），acp-kernel 默认 inline |
+
+- **opencode-acp 不用 acp-kernel**：它是 DCP（opencode-dynamic-context-pruning）的衍生，
+  自己实现（dependencies 仅 zod/jsonc-parser/@opencode-ai/sdk/@anthropic-ai/tokenizer）。
+- 三个下游全部 **build 时 inline bundle + devDependencies**（零运行时依赖）。
+
+**方案 A 改动对下游的影响——完全向后兼容**：
+
+| 改动 | 对下游的影响 |
+|---|---|
+| `CompressionState` 加 `tokenSnapshot` | ✅ 新增字段；实现时用 `?? {}` 兜底（`...(state.tokenSnapshot ?? {})`），下游未改 mergeInitialState 也不崩 |
+| `renderVisibleRefs` 返回类型 | ✅ **保留旧签名**（返回 `CoreMessage[]`），新增内部 `renderWithSnapshot()` 供 `createRenderRefsNode.run` 用——下游现有调用零破坏 |
+| `createRenderRefsNode.run` 写回快照 | ✅ 行为透明，state 多一字段，下游无感知 |
+
+**Phase 1（#51，注入 countTokens）对下游**：`estimateMessageTokens` fallback 仍为
+chars/4——下游不传 countTokens 时行为与原来完全一致；传入才用真实估算（更准，纯收益）。
+
+**发布流程（唯一"影响"）**：acp-kernel 为 0.0.x + exact pin，下游**显式 bump** 才升级
+（不会漂移）。发布链：kernel 先发 → npm 验证 → 三个下游逐个 bump devDeps + 重新
+build 发布（billion-context-pi 的 AGENTS.md 已规范：acp-kernel 必须先于下游发布并
+验证 npm 在线）。
