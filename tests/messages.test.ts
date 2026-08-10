@@ -291,6 +291,69 @@ test("coreOutToAgentMessages patches the ref tag onto original messages", () => 
   assert.equal(content.length, 1, "tag embedded in single text block, not separate");
 });
 
+test("coreOutToAgentMessages honors kernel-truncated body instead of original (emergency truncate)", () => {
+  const tag = acpRef("m00002", "13K", "tool:bash") + "\n";
+  const full = "X".repeat(50000);
+  const truncatedBody = "PREFIX".repeat(100) + "\n\n...[truncated for context space]...\n\nSUFFIX";
+  const original = msgEntry("t", toolResult("tc1", "bash", full)).message;
+  const originalById = new Map([["t", original]]);
+  const coreOut: CoreMessage[] = [
+    { id: "t", role: "tool", contentType: "tool-result", toolName: "bash", toolCallId: "tc1", text: tag + truncatedBody },
+  ];
+
+  const out = coreOutToAgentMessages(coreOut, originalById);
+  const msg = out[0] as { role: string; toolCallId: string; toolName: string; content: Array<{ type: string; text: string }> };
+  assert.equal(msg.role, "toolResult", "role preserved");
+  assert.equal(msg.toolCallId, "tc1", "toolCallId preserved");
+  const text = msg.content.find((b) => b.type === "text")!.text;
+  assert.ok(text.includes("[truncated for context space]"), "truncation marker present in rebuilt body");
+  assert.ok(!text.includes("X".repeat(100)), "full original body not emitted");
+  assert.ok(text.includes("m00002"), "ref tag preserved");
+  assert.ok(text.length < full.length, "body is shorter than original");
+});
+
+test("coreOutToAgentMessages does NOT rebuild when non-truncated body starts with newlines (no false positive)", () => {
+  const tag = acpRef("m00003", "2", "tool:bash") + "\n";
+  const body = "\n\nbash output line";
+  const original = msgEntry("n", toolResult("tc3", "bash", body)).message;
+  const originalById = new Map([["n", original]]);
+  const coreOut: CoreMessage[] = [
+    { id: "n", role: "tool", contentType: "tool-result", toolName: "bash", toolCallId: "tc3", text: tag + body },
+  ];
+
+  const out = coreOutToAgentMessages(coreOut, originalById);
+  const text = (out[0] as { content: Array<{ type: string; text: string }> }).content.find((b) => b.type === "text")!.text;
+  assert.ok(text.startsWith("\n\nbash output line"), "leading newlines preserved (no false rebuild)");
+  assert.ok(!text.includes("[truncated"), "no truncation marker on non-truncated message");
+  assert.ok(text.includes("m00003"), "ref tag still appended");
+});
+
+test("coreOutToAgentMessages honors kernel-truncated body for string-content tool results", () => {
+  const tag = acpRef("m00004", "13K", "tool:bash") + "\n";
+  const full = "Y".repeat(40000);
+  const truncatedBody = "PRE".repeat(80) + "\n\n...[truncated for context space]...\n\nEND";
+  const original = {
+    role: "toolResult",
+    toolCallId: "tc4",
+    toolName: "bash",
+    content: full,
+    isError: false,
+    timestamp: Date.now(),
+  };
+  const originalById = new Map([["s", original as SessionMessageEntry["message"]]]);
+  const coreOut: CoreMessage[] = [
+    { id: "s", role: "tool", contentType: "tool-result", toolName: "bash", toolCallId: "tc4", text: tag + truncatedBody },
+  ];
+
+  const out = coreOutToAgentMessages(coreOut, originalById);
+  const msg = out[0] as { role: string; content: string };
+  assert.equal(msg.role, "toolResult");
+  assert.equal(typeof msg.content, "string", "string content preserved as string");
+  assert.ok(msg.content.includes("[truncated for context space]"), "truncated body present");
+  assert.ok(!msg.content.includes("Y".repeat(100)), "full original not emitted");
+  assert.ok(msg.content.includes("m00004"), "ref tag preserved");
+});
+
 test("coreOutToAgentMessages returns original unchanged when no ref tag is present", () => {
   const original = msgEntry("a", user("hello")).message;
   const originalById = new Map([["a", original]]);

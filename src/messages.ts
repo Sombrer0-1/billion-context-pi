@@ -225,6 +225,18 @@ function patchRefTag(original: AgentMessage, core: CoreMessage): AgentMessage {
   // previous responses and echoes them, causing visible tag fragments in the terminal.
   // The model can still reference assistant messages by inferring refs from context.
   if (base.role === "assistant") return original;
+  // Honor kernel body mutations (emergency truncation of large tool-results,
+  // future rewrites): if core.text's body differs from the original text,
+  // rebuild from the kernel body — otherwise truncation never reaches the model.
+  const tagCore = tag.replace(/\s+$/, "");
+  let bodyStart = tagCore.length;
+  if (core.text && core.text.charAt(bodyStart) === "\n") bodyStart += 1;
+  const coreBody = core.text ? core.text.slice(bodyStart) : "";
+  const originalBody = extractText(base.content);
+  const trimEnd = (s: string): string => s.replace(/\s+$/, "");
+  if (coreBody && trimEnd(coreBody) !== trimEnd(originalBody)) {
+    return rebuildBodyFromCore(original, coreBody, tag);
+  }
   const rawBlocks = Array.isArray(base.content)
     ? base.content
     : typeof base.content === "string"
@@ -251,6 +263,26 @@ function patchRefTag(original: AgentMessage, core: CoreMessage): AgentMessage {
     ...(original as object),
     content: [...peeled, { type: "text" as const, text: tag }],
   } as AgentMessage;
+}
+
+function rebuildBodyFromCore(
+  original: AgentMessage,
+  coreBody: string,
+  tag: string,
+): AgentMessage {
+  const base = original as AnyMessage;
+  const text = `${coreBody.replace(/\s+$/, "")}\n\n${tag}`;
+  if (typeof base.content === "string") {
+    return { ...(original as object), content: text } as AgentMessage;
+  }
+  if (Array.isArray(base.content)) {
+    const nonText = base.content.filter((b) => (b as { type?: string }).type !== "text");
+    return {
+      ...(original as object),
+      content: [...nonText, { type: "text" as const, text }],
+    } as AgentMessage;
+  }
+  return { ...(original as object), content: [{ type: "text" as const, text }] } as AgentMessage;
 }
 
 function peelRefTagBlocks(blocks: unknown[]): unknown[] {
