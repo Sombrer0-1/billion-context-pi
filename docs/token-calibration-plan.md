@@ -375,16 +375,28 @@ token 数**不需要每轮跟随 density 重算**。
 3. `render-refs.ts`：
    - `renderMessage(..., snapshot)`：strip 旧标签后
      `const tokens = snapshot[ref] ?? (snapshot[ref] = countTokens(cleanText))`
-   - `renderVisibleRefs(...)` 改为返回
-     `{ messages, tokenSnapshot }`——函数内 `const snapshot = { ...(state.tokenSnapshot ?? {}) }`
-     局部拷贝，渲染过程写入，返回新快照
-   - `createRenderRefsNode.run(io, ctx)`：
+   - `renderVisibleRefs(...)` **保留旧签名**（返回 `CoreMessage[]`，吸收 G5，
+     非 breaking change），新增内部 `renderWithSnapshot(messages, state,
+     countTokens, strategy)` 返回 `{ messages, tokenSnapshot }`——函数内
+     `const snapshot = { ...(state.tokenSnapshot ?? {}) }` 局部拷贝后写入，
+     节点侧用它
+   - `createRenderRefsNode.run(io, ctx)`（**目标态，非现状**，吸收 G6）：
      `return { ...io, messages, state: { ...io.state, tokenSnapshot } }`
+     （现状 dist 的 run 只返回 `{ ...io, messages: ... }` 不更新 state）
+4. `sync.ts` `syncBlocks()`：重建 state 时**保留并 shallow-clone**
+   `tokenSnapshot: { ...(state.tokenSnapshot ?? {}) }`（吸收 G1——pipeline 中
+   sync-blocks 节点在 render-refs **之前**运行；不保留则 render-refs 每轮读到
+   空快照、全部重算，方案失效）
+5. `compress.ts` `cloneState()`：同样保留 `tokenSnapshot`（吸收 G2——
+   applyCompression 的 clone→压缩→写回路径，不保留则压缩后快照丢失）
 
 **改动点（billion-context-pi adapter，吸收 F1）**：
 - `src/state.ts` `mergeInitialState`：补
   `tokenSnapshot: parsed.tokenSnapshot ?? fresh.tokenSnapshot`
   ——旧 `.acp.json`（无该字段）加载后为 `{}`，不触发 TypeError
+  **注意（吸收 G3）**：`fresh.tokenSnapshot` 来自 kernel `createInitialState`，
+  **必须 kernel 先改先发，adapter 再改**，兼容闭环才成立；顺序反了会
+  fallback 成 `undefined`（随后读取报错或退化）
 
 **效果**：
 - 标签在消息首次渲染时用"当时的 density"算一次 → **之后永久稳定**
@@ -393,7 +405,7 @@ token 数**不需要每轮跟随 density 重算**。
 - 新消息（density 收敛后写入）标签用收敛值，**精度不损失**
 - 旧消息标签是历史快照（可能在 density=1 时写入而低估）——稳定优先，可接受
 
-**成本**：kernel 结构小改（state 顶层一字段 + render 快照读写）+ adapter
+**成本**：kernel 改动 5 处（types/state/render-refs/sync/cloneState）+ adapter
 mergeInitialState 一行 + 测试更新。跨重启持久化后重启也不重算。
 
 ### 11.3 已知 trade-off（吸收 F3/F5，明确不修）
@@ -485,3 +497,19 @@ chars/4——下游不传 countTokens 时行为与原来完全一致；传入才
 （不会漂移）。发布链：kernel 先发 → npm 验证 → 三个下游逐个 bump devDeps + 重新
 build 发布（billion-context-pi 的 AGENTS.md 已规范：acp-kernel 必须先于下游发布并
 验证 npm 在线）。
+
+### 11.9 二次审阅闭环（mimo-v2.5-pro，2026-08-10）
+
+> 定稿版初稿提交（db2eb4b）后二次外审，聚焦 F2 规避全链路验证。结论：
+> **定稿方向正确，但改动清单扩大——kernel 侧从 3 处变 5 处**。G1/G2 为
+> Blocker，已并入 §11.2 改动点；G3 决定实施顺序；G5 与 §11.8 一致（保留
+> 旧签名）；G6 为文档标注。
+
+| # | 严重度 | 内容 | 处置 |
+|---|---|---|---|
+| G1 | Blocker | `syncBlocks()`（dist:230-265）手动重建 state 只拷 6 字段，`tokenSnapshot` 被丢；pipeline 中 sync-blocks 在 render-refs **之前**运行 → render-refs 每轮读到空快照、全部重算，方案失效 | ✅ §11.2 改动点 4：syncBlocks 保留并 shallow-clone `tokenSnapshot` |
+| G2 | Blocker | `cloneState()`（dist:1597-1615）同样不保留 → applyCompression 的 clone→压缩→写回路径丢快照 | ✅ §11.2 改动点 5：cloneState 保留 `tokenSnapshot` |
+| G3 | Major | adapter `mergeInitialState` 尚未实现 + kernel `createInitialState` 当前也无该字段 → 兼容闭环不成立 | ✅ §11.2 标注：**kernel 先改先发，adapter 再改** |
+| G4 | Minor | processTurn 返回 turn.state、adapter save 的链路本身 OK | ✅ 验证清单补"连续两轮 processTurn 后 tokenSnapshot 仍在"（11.5 第 4 条已覆盖 assignRefs，补 sync-blocks 场景） |
+| G5 | Major | `renderVisibleRefs` 改返回类型是 breaking change | ✅ §11.2 改为保留旧签名 + 内部 `renderWithSnapshot()`（与 §11.8 下游分析一致） |
+| G6 | Nit | 文档写的 run 返回 state 与现状不一致（现状 run 不更新 state） | ✅ §11.2 标注"目标态，非现状" |
