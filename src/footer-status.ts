@@ -26,7 +26,7 @@ export function updateFooterStatus(): void {
   let text: string | undefined;
   if (usage && usage.totalTokens > 0) {
     const costStr = usage.cost.total > 0 ? ` ($${usage.cost.total.toFixed(4)})` : "";
-    text = `delegate \u2191${formatCompactTokens(usage.input)} \u2193${formatCompactTokens(usage.output)}${costStr}`;
+    text = `sub-agents \u2191${formatCompactTokens(usage.input)} \u2193${formatCompactTokens(usage.output)}${costStr}`;
   }
   if (text === lastFooterText) return;
   lastFooterText = text ?? "";

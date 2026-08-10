@@ -51,7 +51,7 @@ test("updateFooterStatus renders cumulative delegate usage and dedupes", () => {
   addDelegateUsage(USAGE);
   initFooterStatus(mock.ctx);
   updateFooterStatus();
-  assert.deepEqual(mock.calls, [["billion-context-pi", "delegate \u219112k \u219331 ($0.0016)"]]);
+  assert.deepEqual(mock.calls, [["billion-context-pi", "sub-agents \u219112k \u219331 ($0.0016)"]]);
   updateFooterStatus();
   assert.equal(mock.calls.length, 1, "unchanged text does not re-set status");
   disposeFooterStatus();
