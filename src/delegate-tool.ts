@@ -14,7 +14,7 @@ import type {
   ExtensionContext,
   ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
-import { debug } from "./log.js";
+import { debug, logError, logInfo, logWarn } from "./log.js";
 import { attachWatchdogs } from "./delegate-watchdog.js";
 import { parseEventLine, activityLines, newPortion, ThinkingCollector } from "./delegate-events.js";
 import { isPiHost } from "./runtime.js";
@@ -362,6 +362,7 @@ export function makeDelegateCancelTool(_pi: ExtensionAPI): ToolDefinition<typeof
         run.child?.kill("SIGTERM");
       } catch (err) {
         debug.event("delegate-cancel-kill-error", { runId, error: String(err) });
+        logError("delegate", { event: "cancel-kill-error", runId, error: String(err) });
       }
       delegateStatusWidget.poke();
       return {
@@ -403,36 +404,26 @@ async function runDelegate(
   const requestedAsync = args.async !== false;
   if (requestedAsync && !isAsync) {
     debug.event("delegate-async-downgraded", { reason: `mode=${ctx.mode}` });
+    logInfo("delegate", { event: "async-downgraded", reason: `mode=${ctx.mode}` });
   }
-  debug.event("delegate-spawn", { agent: args.agent, cwd, async: isAsync, useJsonStream, cliArgs });
+  const runId = `del_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`;
+  debug.event("delegate-spawn", { agent: args.agent, runId, cwd, async: isAsync, useJsonStream, cliArgs });
+  logInfo("delegate", { event: "spawn", agent: args.agent, runId, cwd, async: isAsync, useJsonStream, mode: ctx.mode, parentDepth });
 
-  // Spawn a child pi process using the SAME binary that is currently running.
-  // Hardcoding "pi" breaks under renamed forks (e.g. pi-stable whose bin is
-  // "pi-stable"). process.execPath is the Node binary, process.argv[1] is the
-  // cli.js entrypoint of the currently running pi — together they always point
-  // at the right executable regardless of how it was installed.
   const child = spawn(process.execPath, [process.argv[1]!, ...cliArgs], {
     cwd,
     env: childEnv,
     stdio: ["pipe", "pipe", "pipe"],
     shell: process.platform === "win32",
   }) as ChildProcess;
-  // Pass the task via stdin (not argv) so tasks starting with `-` are not
-  // mis-parsed as CLI options. pi reads piped stdin as the prompt in print mode.
-  // N1: a fast-exiting child (bad provider, ENOENT, SIGTERM) closes the pipe
-  // before we finish writing → EPIPE → 'error' on stdin. Without a listener
-  // that becomes an uncaughtException and can crash the host pi. Attach an
-  // error listener so the event is swallowed and logged.
   child.stdin?.once("error", (e: Error) => {
     debug.event("delegate-stdin-error", { runId: "pre-spawn", error: String(e) });
+    logError("delegate", { event: "stdin-error", runId, error: String(e) });
   });
   child.stdin?.end(args.task);
 
-  // stderr buffering is shared by async (error / non-zero fallback) and sync
-  // (waitForChild attaches its own stdout listener).
   let stderrText = "";
 
-  const runId = `del_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`;
   const startedAt = Date.now();
 
   if (isAsync) {
@@ -591,25 +582,27 @@ async function runDelegate(
           // (and marks consumed so we don't double-deliver by injecting).
           if (run.waiter) {
             debug.event("delegate-done", { runId, code, status: run.status, injected: false, via: "wait", outLen: output.length, file });
+            logInfo("delegate", { event: "done", runId, agent: args.agent, code, status: run.status, injected: false, via: "wait", outLen: output.length, file });
             run.waiter();
             delegateStatusWidget.poke();
             return;
           }
-          // If a wait already returned this result, skip the injection.
           if (run.consumed) {
             debug.event("delegate-done", { runId, code, status: run.status, injected: false, via: "consumed", outLen: output.length, file });
+            logInfo("delegate", { event: "done", runId, agent: args.agent, code, status: run.status, injected: false, via: "consumed", outLen: output.length, file });
             delegateStatusWidget.poke();
             return;
           }
           const injected = injectResult(pi, args.agent, runId, args.task, code, file, run.timedOut);
           run.injected = injected;
           debug.event("delegate-done", { runId, code, status: run.status, injected, outLen: output.length, file });
+          logInfo("delegate", { event: "done", runId, agent: args.agent, code, status: run.status, injected, outLen: output.length, file });
           delegateStatusWidget.poke();
         } catch (err) {
-          // Persist failed — still need to finalize so a waiter doesn't hang.
           run.status = "failed";
           run.finishedAt = Date.now();
           debug.event("delegate-done-error", { runId, error: String(err) });
+          logError("delegate", { event: "done-error", runId, agent: args.agent, error: String(err) });
           run.waiter?.();
           delegateStatusWidget.poke();
         }
@@ -636,6 +629,7 @@ async function runDelegate(
         run.finishedAt = Date.now();
         run.result = { code: null, file: "", body: `spawn error: ${String(err)}` };
         debug.event("delegate-spawn-error", { runId, error: String(err) });
+        logError("delegate", { event: "spawn-error", runId, agent: args.agent, error: String(err) });
         run.waiter?.();
         delegateStatusWidget.poke();
       }
@@ -784,6 +778,7 @@ function injectResult(
   const send = pi.sendUserMessage;
   if (typeof send !== "function") {
     debug.event("delegate-inject-skipped", { runId, reason: "sendUserMessage unavailable" });
+    logWarn("delegate", { event: "inject-skipped", runId, reason: "sendUserMessage unavailable" });
     return false;
   }
   const status = code === 0 ? "completed" : "failed";
@@ -808,6 +803,7 @@ function injectResult(
     return true;
   } catch (err) {
     debug.event("delegate-inject-error", { runId, error: String(err) });
+    logError("delegate", { event: "inject-error", runId, agent, error: String(err) });
     return false;
   }
 }
@@ -846,6 +842,7 @@ async function persistResult(runId: string, body: string): Promise<string> {
     return file;
   } catch (err) {
     debug.event("delegate-persist-error", { runId, file, error: String(err) });
+    logError("delegate", { event: "persist-error", runId, file, error: String(err) });
     return "";
   }
 }

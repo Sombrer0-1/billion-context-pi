@@ -1,7 +1,7 @@
 import { Type, type Static } from "typebox";
 import type { AgentToolResult, ExtensionContext, ToolDefinition } from "@earendil-works/pi-coding-agent";
 import type { AcpRuntime } from "./runtime.js";
-import { debug } from "./log.js";
+import { debug, logError, logInfo, logThrow } from "./log.js";
 import { parseBlockIdArg, collectBlockContent } from "acp-kernel";
 import { entriesToCoreMessages } from "./messages.js";
 import { writeFile, mkdir } from "node:fs/promises";
@@ -44,7 +44,13 @@ export function makeDecompressTool(runtime: AcpRuntime): ToolDefinition<typeof D
     ],
     parameters: DecompressParams,
     async execute(_toolCallId, params, _signal, _onUpdate, ctx): Promise<AgentToolResult<unknown>> {
-      const result = await handleDecompress(params as DecompressArgs, runtime, ctx);
+      let result: string;
+      try {
+        result = await handleDecompress(params as DecompressArgs, runtime, ctx);
+      } catch (e) {
+        logThrow("decompress", e, { sid: ctx.sessionManager.getSessionId(), blockId: (params as DecompressArgs).blockId });
+        throw e;
+      }
       return { details: undefined, content: [{ type: "text", text: result }] };
     },
   };
@@ -123,16 +129,21 @@ async function handleMessageRef(
 
   if (!wantFile) {
     debug.event("decompress-message", { ref, ownerBlockId, mode: "inline", chars: text.length });
+    logInfo("decompress", { sid: ctx.sessionManager.getSessionId(), event: "message", mode: "inline", ref, ownerBlockId, chars: text.length });
     return `Message ${ref} (${role}, block ${ownerBlockId}, ${text.length} chars) restored inline:\n\n${text}`;
   }
 
   const targetPath = args.toFile ? resolveToFilePath(args.toFile) : autoFilePath(`msg-${ref}`);
-  if (typeof targetPath === "object" && "error" in targetPath) return targetPath.error;
+  if (typeof targetPath === "object" && "error" in targetPath) {
+    logError("decompress", { sid: ctx.sessionManager.getSessionId(), event: "message-path-rejected", ref, toFile: args.toFile });
+    return targetPath.error;
+  }
 
   await mkdir(AUTO_DIR, { recursive: true }).catch(() => {});
   await writeFile(targetPath, text, "utf8");
 
   debug.event("decompress-message", { ref, ownerBlockId, mode: "file", path: targetPath, chars: text.length });
+  logInfo("decompress", { sid: ctx.sessionManager.getSessionId(), event: "message", mode: "file", ref, ownerBlockId, path: targetPath, chars: text.length });
 
   return [
     `Message ${ref} (${role}, block ${ownerBlockId}, ${text.length} chars) written to ${targetPath}.`,
@@ -172,21 +183,23 @@ async function handleDecompress(args: DecompressArgs, runtime: AcpRuntime, ctx: 
   // cost (e.g. small restorations or when it must reason over exact text).
   if (args.inline === true && !args.toFile) {
     debug.event("decompress", { blockId, full, count, mode: "inline" });
+    logInfo("decompress", { sid: ctx.sessionManager.getSessionId(), event: "block", mode: "inline", blockId, full, count });
     return `Restored block ${blockId} (${count} item${count === 1 ? "" : "s"}) inline:\n\n${text}`;
   }
 
-  // file mode (default): write to disk. Determined path is either the explicit
-  // toFile or an auto-generated location. The block stays compressed; only a
-  // short path + preview is added to the conversation.
   const targetPath = args.toFile
     ? resolveToFilePath(args.toFile)
     : autoFilePath(blockId);
-  if (typeof targetPath === "object" && "error" in targetPath) return targetPath.error;
+  if (typeof targetPath === "object" && "error" in targetPath) {
+    logError("decompress", { sid: ctx.sessionManager.getSessionId(), event: "block-path-rejected", blockId, toFile: args.toFile });
+    return targetPath.error;
+  }
 
   await mkdir(AUTO_DIR, { recursive: true }).catch(() => {});
   await writeFile(targetPath, text, "utf8");
 
   debug.event("decompress", { blockId, full, count, mode: "file", path: targetPath, chars: text.length });
+  logInfo("decompress", { sid: ctx.sessionManager.getSessionId(), event: "block", mode: "file", blockId, full, count, path: targetPath, chars: text.length });
 
   const itemWord = count === 1 ? "item" : "items";
   const lines = [

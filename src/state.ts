@@ -1,14 +1,12 @@
 import { promises as fs } from "node:fs";
 import * as path from "node:path";
 import { createInitialState, type CompressionState } from "acp-kernel";
+import { logError, logWarn } from "./log.js";
 
 const STATE_SUFFIX = ".acp.json";
 
 function stateFileFor(sessionFile: string | undefined): string | null {
   if (sessionFile) return sessionFile + STATE_SUFFIX;
-  // No session file (--no-session, e.g. delegate children): state is ephemeral,
-  // do NOT persist. Previously this fell back to process.cwd() and polluted
-  // the parent's working directory with .acp-<sid>.json litter.
   return null;
 }
 
@@ -25,8 +23,11 @@ export class SessionStateStore {
         const raw = await fs.readFile(file, "utf8");
         const parsed = JSON.parse(raw) as CompressionState;
         if (parsed && Array.isArray(parsed.blocks)) state = mergeInitialState(parsed);
-      } catch {
-        // missing/corrupt file -> fresh state
+      } catch (e) {
+        const code = (e as NodeJS.ErrnoException).code;
+        if (code !== "ENOENT") {
+          logWarn("state", { event: "load-failed", file, error: e instanceof Error ? e.message : String(e) });
+        }
       }
     }
     this.cache = state;
@@ -36,14 +37,20 @@ export class SessionStateStore {
 
   async save(state: CompressionState, sessionFile: string | undefined, _sessionId: string): Promise<void> {
     const file = stateFileFor(sessionFile);
-    if (!file) return; // ephemeral session: don't persist
+    if (!file) return;
     this.cache = state;
     this.loadedKey = file;
     const dir = path.dirname(file);
-    await fs.mkdir(dir, { recursive: true }).catch(() => {});
+    await fs.mkdir(dir, { recursive: true }).catch((e: unknown) => {
+      logError("state", { event: "save-mkdir-failed", dir, error: e instanceof Error ? e.message : String(e) });
+    });
     const tmp = path.join(dir, `.acp-tmp-${path.basename(file)}`);
-    await fs.writeFile(tmp, JSON.stringify(state), "utf8");
-    await fs.rename(tmp, file);
+    try {
+      await fs.writeFile(tmp, JSON.stringify(state), "utf8");
+      await fs.rename(tmp, file);
+    } catch (e) {
+      logError("state", { event: "save-failed", file, error: e instanceof Error ? e.message : String(e) });
+    }
   }
 
   invalidate(): void {
