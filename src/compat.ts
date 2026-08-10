@@ -18,20 +18,6 @@ export function normalizeSystemPrompt(input: string | string[] | undefined): str
 }
 
 /**
- * Format a systemPrompt by appending content, preserving the original type.
- * If base is string[], returns string[]; if string, returns string.
- */
-export function formatSystemPrompt(
-  base: string | string[],
-  append: string
-): string | string[] {
-  if (Array.isArray(base)) {
-    return [...base, "", append];
-  }
-  return `${base}\n\n${append}`;
-}
-
-/**
  * Format systemPrompt for before_agent_start event handler.
  * Always returns string to satisfy pi's type definition, but handles
  * both string (pi) and string[] (omp) input types at runtime.

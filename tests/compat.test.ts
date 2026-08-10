@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { normalizeSystemPrompt, formatSystemPrompt, formatSystemPromptForEvent, getSystemPromptText } from "../src/compat.js";
+import { normalizeSystemPrompt, formatSystemPromptForEvent, getSystemPromptText } from "../src/compat.js";
 
 test("normalizeSystemPrompt returns empty string for undefined", () => {
   assert.equal(normalizeSystemPrompt(undefined), "");
@@ -20,28 +20,6 @@ test("normalizeSystemPrompt handles empty array", () => {
 
 test("normalizeSystemPrompt handles single-element array", () => {
   assert.equal(normalizeSystemPrompt(["only"]), "only");
-});
-
-test("formatSystemPrompt appends to string with double newline", () => {
-  const result = formatSystemPrompt("base prompt", "ACP prompt");
-  assert.equal(result, "base prompt\n\nACP prompt");
-});
-
-test("formatSystemPrompt appends to array preserving array type", () => {
-  const result = formatSystemPrompt(["base1", "base2"], "ACP prompt");
-  assert.ok(Array.isArray(result), "result should be array");
-  assert.deepEqual(result, ["base1", "base2", "", "ACP prompt"]);
-});
-
-test("formatSystemPrompt handles empty base string", () => {
-  const result = formatSystemPrompt("", "ACP prompt");
-  assert.equal(result, "\n\nACP prompt");
-});
-
-test("formatSystemPrompt handles empty base array", () => {
-  const result = formatSystemPrompt([], "ACP prompt");
-  assert.ok(Array.isArray(result));
-  assert.deepEqual(result, ["", "ACP prompt"]);
 });
 
 test("formatSystemPromptForEvent always returns string for pi type compatibility", () => {

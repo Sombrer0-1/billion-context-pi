@@ -25,17 +25,21 @@ test("loadUserConfig returns empty object when no config files exist", async () 
 });
 
 test("loadUserConfig reads global config from home directory", async () => {
-  const tmpDir = path.join(os.tmpdir(), `acp-test-global-${Date.now()}`);
-  await fs.mkdir(tmpDir, { recursive: true });
-  await writeConfig(os.homedir(), { debug: true, autoUpdate: false });
+  const tmpCwd = path.join(os.tmpdir(), `acp-test-cwd-${Date.now()}`);
+  const tmpHome = path.join(os.tmpdir(), `acp-test-home-${Date.now()}`);
+  await fs.mkdir(tmpCwd, { recursive: true });
+  await fs.mkdir(tmpHome, { recursive: true });
+  const savedHome = process.env.HOME;
+  process.env.HOME = tmpHome;
   try {
-    const config = await loadUserConfig(tmpDir);
+    await writeConfig(tmpHome, { debug: true, autoUpdate: false });
+    const config = await loadUserConfig(tmpCwd);
     assert.equal(config.debug, true);
     assert.equal(config.autoUpdate, false);
   } finally {
-    const globalConfigFile = path.join(os.homedir(), CONFIG_DIR_NAME, "acp.json");
-    await fs.rm(globalConfigFile, { force: true });
-    await fs.rm(tmpDir, { recursive: true, force: true });
+    process.env.HOME = savedHome;
+    await fs.rm(tmpCwd, { recursive: true, force: true });
+    await fs.rm(tmpHome, { recursive: true, force: true });
   }
 });
 
@@ -53,18 +57,22 @@ test("loadUserConfig reads project config from cwd", async () => {
 });
 
 test("loadUserConfig project config overrides global config", async () => {
-  const tmpDir = path.join(os.tmpdir(), `acp-test-override-${Date.now()}`);
-  await fs.mkdir(tmpDir, { recursive: true });
-  await writeConfig(os.homedir(), { debug: true, modelContextLimit: 200_000 });
-  await writeConfig(tmpDir, { debug: false });
+  const tmpCwd = path.join(os.tmpdir(), `acp-test-override-cwd-${Date.now()}`);
+  const tmpHome = path.join(os.tmpdir(), `acp-test-override-home-${Date.now()}`);
+  await fs.mkdir(tmpCwd, { recursive: true });
+  await fs.mkdir(tmpHome, { recursive: true });
+  const savedHome = process.env.HOME;
+  process.env.HOME = tmpHome;
   try {
-    const config = await loadUserConfig(tmpDir);
+    await writeConfig(tmpHome, { debug: true, modelContextLimit: 200_000 });
+    await writeConfig(tmpCwd, { debug: false });
+    const config = await loadUserConfig(tmpCwd);
     assert.equal(config.debug, false, "project debug overrides global");
     assert.equal(config.modelContextLimit, 200_000, "global modelContextLimit preserved");
   } finally {
-    const globalConfigFile = path.join(os.homedir(), CONFIG_DIR_NAME, "acp.json");
-    await fs.rm(globalConfigFile, { force: true });
-    await fs.rm(tmpDir, { recursive: true, force: true });
+    process.env.HOME = savedHome;
+    await fs.rm(tmpCwd, { recursive: true, force: true });
+    await fs.rm(tmpHome, { recursive: true, force: true });
   }
 });
 

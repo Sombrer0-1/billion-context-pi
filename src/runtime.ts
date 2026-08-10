@@ -9,6 +9,7 @@ import {
 import { resolveConfig, type AdapterConfig } from "./config.js";
 import { entriesToCoreMessages } from "./messages.js";
 import { SessionStateStore } from "./state.js";
+import { logInfo, logWarn } from "./log.js";
 
 // pi exposes `sessionManager.buildContextEntries()`; omp (oh-my-pi) only has
 // `getBranch()`. Both return chronological SessionEntry[]; feature-detect so the
@@ -67,12 +68,10 @@ function mergeLiveEntries(entries: SessionEntry[], live: AgentMessage[]): Sessio
   const persisted = entries.filter((e): e is SessionMessageEntry => e.type === "message");
   const out: SessionEntry[] = [];
   let p = 0;
+  let unmatched = 0;
   for (let i = 0; i < live.length; i++) {
     const msg = live[i]!;
     let matched: SessionMessageEntry | undefined;
-    // Entries with a different role (thinking_level_change etc. are already
-    // filtered; this also skips custom/projected messages omp interleaves)
-    // are not consumed — only the same-role records participate in matching.
     let j = p;
     while (j < persisted.length && persisted[j]!.message.role !== msg.role) j++;
     if (j < persisted.length && sameMessage(persisted[j]!.message, msg)) {
@@ -82,6 +81,7 @@ function mergeLiveEntries(entries: SessionEntry[], live: AgentMessage[]): Sessio
     if (matched) {
       out.push(matched);
     } else {
+      unmatched++;
       out.push({
         type: "message",
         id: `live-${i}`,
@@ -91,6 +91,7 @@ function mergeLiveEntries(entries: SessionEntry[], live: AgentMessage[]): Sessio
       });
     }
   }
+  if (unmatched > 0) logInfo("runtime", { event: "merge-live-entries", live: live.length, unmatched });
   return out;
 }
 
@@ -103,7 +104,8 @@ function sameMessage(a: AgentMessage, b: AgentMessage): boolean {
   if (ca === undefined || cb === undefined) return false;
   try {
     return JSON.stringify(ca) === JSON.stringify(cb);
-  } catch {
+  } catch (e) {
+    logWarn("runtime", { event: "message-compare-failed", error: e instanceof Error ? e.message : String(e) });
     return a === b;
   }
 }
