@@ -329,7 +329,10 @@ nudge 从不触发——这正是要修的问题。Phase 1（CJK-aware countToke
 机制配合的结果。若未来需要加速收敛，优先考虑自适应门槛
 （`max(20, density × 系数)`），而非全局下调。
 
-## 11. 标签 token 数快照化（修复 density 校准期缓存重建，2026-08-10 提出）
+## 11. 标签 token 数快照化（修复 density 校准期缓存重建）——定稿版
+
+> 2026-08-10 提出初稿 → mimo-v2.5-pro 子代理四轮外审 → 2026-08-10 定稿。
+> 外审 findings 编号（F1-F7）见 11.6；本节已逐条纳入。
 
 ### 11.1 问题：density 校准期 → 前缀缓存反复重建
 
@@ -348,51 +351,107 @@ nudge 从不触发——这正是要修的问题。Phase 1（CJK-aware countToke
 （pending/压缩范围用 state 内的 countTokens 计算，不经标签文本）。所以标签
 token 数**不需要每轮跟随 density 重算**。
 
-### 11.2 方案 A：标签 token 数快照化（推荐）
+### 11.2 方案 A（定稿）：快照放 state 顶层，key = message ref
 
-**思路**：token 数在消息**首次渲染时确定并存入 state**，之后永远读快照，不随
-density 重算。
+**思路**：token 数在消息**首次渲染时确定并存入 `CompressionState.tokenSnapshot`**，
+之后永远读快照，不随 density 重算。
 
-改动点（acp-kernel）：
-1. `types.ts`：`MessageRefMap` 增加 `tokens: Record<string, number>`（key = message id）
-2. `render-refs.ts`：`renderMessage` 改为——strip 旧标签后，从快照读 token
-   （无则用当前 countTokens 计算**并写入快照**）
-3. `state.ts`：初始化空 map（随 state 持久化到 `.acp.json`，跨重启稳定）
+**核心设计决策**（吸收外审 F2）：
+- **快照放 `CompressionState` 顶层**（`tokenSnapshot: Record<string, number>`），
+  **不放 `MessageRefMap` 里**。原因：`assignRefsNode` 每轮调用 `assignRefs`，
+  而 `assignRefs`/`rebuildRefIndex` 只拷贝 `byRaw`/`byRef` 两个字段并整体覆盖
+  `state.messageRefs`——快照若放里面，第一轮写入、第二轮就被吞掉，方案直接
+  失效。放顶层则与 ref 分配生命周期完全解耦，`assignRefs` **零改动**。
+- **key 用 message ref（`mNNNNN`）而非 message id**（吸收外审建议 + 额外验证）：
+  - ref 跨重启稳定（`byRef` 持久化在 `.acp.json`）
+  - ref 与标签文本直接对应（`<acp ...>mNNNNN</acp>` 里的就是 ref）
+  - **额外收益（规避 F4）**：omp 场景 `mergeLiveEntries` 会给未持久化消息临时
+    raw id `live-N`，但 `assignRefs` 对任何有 id 的消息都分配稳定 ref——
+    快照 key=ref 后，`live-N` 被正式 id 替换不影响快照（ref 不变）
+
+**改动点（acp-kernel）**：
+1. `types.ts`：`CompressionState` 增加 `tokenSnapshot: Record<string, number>`
+2. `state.ts`：`createInitialState()` 返回 `tokenSnapshot: {}`
+3. `render-refs.ts`：
+   - `renderMessage(..., snapshot)`：strip 旧标签后
+     `const tokens = snapshot[ref] ?? (snapshot[ref] = countTokens(cleanText))`
+   - `renderVisibleRefs(...)` 改为返回
+     `{ messages, tokenSnapshot }`——函数内 `const snapshot = { ...(state.tokenSnapshot ?? {}) }`
+     局部拷贝，渲染过程写入，返回新快照
+   - `createRenderRefsNode.run(io, ctx)`：
+     `return { ...io, messages, state: { ...io.state, tokenSnapshot } }`
+
+**改动点（billion-context-pi adapter，吸收 F1）**：
+- `src/state.ts` `mergeInitialState`：补
+  `tokenSnapshot: parsed.tokenSnapshot ?? fresh.tokenSnapshot`
+  ——旧 `.acp.json`（无该字段）加载后为 `{}`，不触发 TypeError
 
 **效果**：
-- 标签在消息写入时用"当时的 density"算一次 → **之后永久稳定**
+- 标签在消息首次渲染时用"当时的 density"算一次 → **之后永久稳定**
 - density 收敛期标签不再变化 → 前缀稳定 → **缓存只 miss 一次（重启首轮），
   不再每轮重建**
 - 新消息（density 收敛后写入）标签用收敛值，**精度不损失**
 - 旧消息标签是历史快照（可能在 density=1 时写入而低估）——稳定优先，可接受
 
-**成本**：kernel 结构小改 + 测试更新。跨重启持久化后重启也不重算。
+**成本**：kernel 结构小改（state 顶层一字段 + render 快照读写）+ adapter
+mergeInitialState 一行 + 测试更新。跨重启持久化后重启也不重算。
 
-### 11.3 备选方案对比
+### 11.3 已知 trade-off（吸收 F3/F5，明确不修）
 
-| 维度 | A（快照） | C（render/决策分离） | E（收敛期冻结） |
+- **F3 孤儿条目**：快照只增不减。消息被压缩进 block / prune 后其 ref 不再渲染，
+  快照条目成为孤儿。**接受**：规模上限 ≈ 会话历史消息总数（与 `messageRefs`
+  同量级，几百~几千条），`.acp.json` 多几十 KB 无实际影响。未来若需要可加 GC
+  （syncBlocksNode 后删除不在 `byRef` 的 key），当前不做。
+- **F5 内容重写刷新**：**明确不做**。若加"偏差 >30% 刷新"，density 校准期
+  跳变（1→1.93→2.37，远超 30%）会误触发刷新 → 缓存重建复现，与根治目标
+  直接冲突。消息内容被宿主重写的场景罕见，接受快照固定。未来若需要，应引入
+  独立于 density 的"内容哈希"机制（存 `{ hash, tokens }`，仅当文本哈希变化
+  才刷新），不在本期范围。
+
+### 11.4 备选方案对比（修正 F6 表述）
+
+| 维度 | A（快照，定稿） | C（render/决策分离） | E（收敛期冻结） |
 |---|---|---|---|
 | 根治缓存重建 | ✅ 只 miss 一次 | ✅ 零 miss（标签恒定） | ⚠️ 仍 miss 一次 |
-| 标签精度 | ✅ 新消息保留校准 | ❌ 永远低估 | ⚠️ 收敛后才有 |
-| 改动量 | 中（kernel state+render） | 小（换固定函数） | 最小 |
-| 副作用 | 旧消息标签是历史快照 | 标签不准 | 校准变慢 |
+| 标签精度 | ✅ 新消息保留校准 | ❌ 不随 density 校准（CJK-aware 估算与真实差 10-30%） | ⚠️ 收敛后才有 |
+| 改动量 | 中（kernel state+render + adapter 1 行） | 小（换固定函数） | 最小 |
+| 副作用 | 旧消息标签是历史快照 | 标签精度永久偏差 | 校准变慢 |
 
-- **方案 C**：render-refs 打标签改用不含 density 的固定估算（defaultTokens），
-  density 只用于决策路径。改动最小但标签永远不校准（中文消息低估，仅影响展示）。
+- **方案 C**：render-refs 打标签改用不含 density 的固定估算（CJK-aware
+  countTokens），density 只用于决策路径。改动最小、零 cache miss，但标签
+  精度永远差 10-30%（仅影响展示，不影响压缩决策）。若未来追求"实现最简单 +
+  绝对稳定"可退化为 C。
 - **方案 E**：density 在确认（±20% 连续 2 轮）前保持 1，确认后一次应用。从
-  "每轮重建"变"一次重建"，不彻底且拖慢校准。
+  "每轮重建"变"一次重建"，不彻底且拖慢校准。不推荐。
 
-**推荐 A**：唯一"既根治又不牺牲精度"的方案——快照让旧消息稳定（缓存友好）、
-新消息精确（校准受益），两者兼得。
+**推荐 A（定稿）**：唯一"既根治又不牺牲精度"的方案——快照让旧消息稳定
+（缓存友好）、新消息精确（校准受益），两者兼得。
 
-### 11.4 验证方式
+### 11.5 验证方式（吸收外审，补两条）
 
 1. 单测：同一消息用 density=1 和 density=2 各 render 一次 → 标签 token 数一致
 2. 集成：模拟 density 1→2 收敛 5 轮 → 断言标签不变、前缀稳定
-3. 真实会话：重启后校准期观察缓存 miss 次数（应只有 1 次）
+3. **旧 `.acp.json`（无 `tokenSnapshot` 字段）加载后不报错、快照为 `{}`**（F1）
+4. **`assignRefs` 多轮运行后 `tokenSnapshot` 仍在**（F2 回归守卫）
+5. 真实会话：重启后校准期观察缓存 miss 次数（应只有 1 次）
 
-### 11.5 PR 归属
+### 11.6 PR 归属
 
-- kernel 侧（render-refs + types + state）：新 acp-kernel PR（#51 已建，独立改动）
-- adapter 侧：基本无改动（快照在 kernel 内完成），如有配置开关则进 #97
-- 关联：issue #96（同属校准副作用修复）
+- **kernel 侧**（`types.ts` + `state.ts` + `render-refs.ts`）：新 acp-kernel PR。
+  快照放 state 顶层后 **`assignRefs`/`rebuildRefIndex` 无需改动**（F2 已通过
+  设计规避），PR 描述中说明这一点。
+- **adapter 侧**（`src/state.ts` mergeInitialState 一行）：进 #97（仍在 open，
+  追加 1 commit）。
+- 关联：issue #96（同属校准副作用修复）。
+
+### 11.7 外审 findings 闭环
+
+| # | 严重度 | 内容 | 处置 |
+|---|---|---|---|
+| F1 | Blocker | `mergeInitialState` 不补新字段 → 旧 state 读 `undefined` 报错 | ✅ 11.2 adapter 改动 + 11.5 验证 3 |
+| F2 | Blocker | `assignRefsNode` 每轮覆盖 `messageRefs`，快照放里面必被吞 | ✅ 快照改放 state 顶层，assignRefs 零改动 |
+| F3 | Minor | 快照只增不减 → 孤儿数据 | ⚠️ 接受为 trade-off（11.3），未来可 GC |
+| F4 | Minor | `live-N` 临时 id 不稳定 | ✅ key 用 ref 天然规避（11.2） |
+| F5 | Minor | 内容重写后快照不失效 | ⚠️ 明确不做（与根治冲突），记入 trade-off（11.3） |
+| F6 | Nit | 方案 C "永远低估"表述过强 | ✅ 11.4 修正为"不随 density 校准（差 10-30%）" |
+| F7 | Nit | 未点出 assignRefs 需保留 | ✅ 11.6 说明快照顶层化后 assignRefs 无需改动 |
