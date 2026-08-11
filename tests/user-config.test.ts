@@ -16,17 +16,33 @@ async function writeConfig(dir: string, data: object): Promise<string> {
   return filePath;
 }
 
-let savedHome: string | undefined;
+type HomeEnv = { HOME: string | undefined; USERPROFILE: string | undefined };
+
+function snapshotHome(): HomeEnv {
+  return { HOME: process.env.HOME, USERPROFILE: process.env.USERPROFILE };
+}
+
+function setHome(dir: string): void {
+  process.env.HOME = dir;
+  process.env.USERPROFILE = dir;
+}
+
+function restoreHome(env: HomeEnv): void {
+  process.env.HOME = env.HOME;
+  process.env.USERPROFILE = env.USERPROFILE;
+}
+
+let savedHome: HomeEnv;
 let hookHome: string;
 
 before(async () => {
-  savedHome = process.env.HOME;
+  savedHome = snapshotHome();
   hookHome = await fs.mkdtemp(path.join(os.tmpdir(), "acp-home-"));
-  process.env.HOME = hookHome;
+  setHome(hookHome);
 });
 
 after(async () => {
-  process.env.HOME = savedHome;
+  restoreHome(savedHome);
   await fs.rm(hookHome, { recursive: true, force: true });
 });
 
@@ -43,15 +59,15 @@ test("loadUserConfig reads global config from home directory", async () => {
   const tmpHome = path.join(os.tmpdir(), `acp-test-home-${Date.now()}`);
   await fs.mkdir(tmpCwd, { recursive: true });
   await fs.mkdir(tmpHome, { recursive: true });
-  const savedHome = process.env.HOME;
-  process.env.HOME = tmpHome;
+  const savedHome = snapshotHome();
+  setHome(tmpHome);
   try {
     await writeConfig(tmpHome, { debug: true, autoUpdate: false });
     const config = await loadUserConfig(tmpCwd);
     assert.equal(config.debug, true);
     assert.equal(config.autoUpdate, false);
   } finally {
-    process.env.HOME = savedHome;
+    restoreHome(savedHome);
     await fs.rm(tmpCwd, { recursive: true, force: true });
     await fs.rm(tmpHome, { recursive: true, force: true });
   }
@@ -75,8 +91,8 @@ test("loadUserConfig project config overrides global config", async () => {
   const tmpHome = path.join(os.tmpdir(), `acp-test-override-home-${Date.now()}`);
   await fs.mkdir(tmpCwd, { recursive: true });
   await fs.mkdir(tmpHome, { recursive: true });
-  const savedHome = process.env.HOME;
-  process.env.HOME = tmpHome;
+  const savedHome = snapshotHome();
+  setHome(tmpHome);
   try {
     await writeConfig(tmpHome, { debug: true, modelContextLimit: 200_000 });
     await writeConfig(tmpCwd, { debug: false });
@@ -84,7 +100,7 @@ test("loadUserConfig project config overrides global config", async () => {
     assert.equal(config.debug, false, "project debug overrides global");
     assert.equal(config.modelContextLimit, 200_000, "global modelContextLimit preserved");
   } finally {
-    process.env.HOME = savedHome;
+    restoreHome(savedHome);
     await fs.rm(tmpCwd, { recursive: true, force: true });
     await fs.rm(tmpHome, { recursive: true, force: true });
   }
