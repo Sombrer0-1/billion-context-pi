@@ -1,6 +1,7 @@
 import {
   spawn,
   type ChildProcess,
+  type SpawnOptions,
 } from "node:child_process";
 import { createWriteStream, type WriteStream } from "node:fs";
 import { mkdir, mkdtemp, writeFile, rm, appendFile } from "node:fs/promises";
@@ -27,6 +28,15 @@ const ASYNC_TIMEOUT_MS = 30 * 60_000;
 const KILL_GRACE_MS = 10_000;
 const RESULT_SUMMARY_CHARS = 500;
 const OUT_DIR = join(tmpdir(), "acp-delegate");
+
+export function delegateSpawnOptions(cwd: string, env: NodeJS.ProcessEnv): SpawnOptions {
+  return {
+    cwd,
+    env,
+    stdio: ["pipe", "pipe", "pipe"],
+    shell: false,
+  };
+}
 
 /** ACP context-management tools that every restricted delegate must retain
  *  so it can manage its own context under billion-context-pi. */
@@ -410,12 +420,11 @@ async function runDelegate(
   debug.event("delegate-spawn", { agent: args.agent, runId, cwd, async: isAsync, useJsonStream, cliArgs });
   logInfo("delegate", { event: "spawn", agent: args.agent, runId, cwd, async: isAsync, useJsonStream, mode: ctx.mode, parentDepth });
 
-  const child = spawn(process.execPath, [process.argv[1]!, ...cliArgs], {
-    cwd,
-    env: childEnv,
-    stdio: ["pipe", "pipe", "pipe"],
-    shell: process.platform === "win32",
-  }) as ChildProcess;
+  const child = spawn(
+    process.execPath,
+    [process.argv[1]!, ...cliArgs],
+    delegateSpawnOptions(cwd, childEnv),
+  ) as ChildProcess;
   child.stdin?.once("error", (e: Error) => {
     debug.event("delegate-stdin-error", { runId: "pre-spawn", error: String(e) });
     logError("delegate", { event: "stdin-error", runId, error: String(e) });
