@@ -2,6 +2,7 @@ import { readFile, writeFile, stat, copyFile, rename } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { CONFIG_DIR_NAME } from "@earendil-works/pi-coding-agent";
 import { debug, logError, logWarn } from "./log.js";
 
 const ACP_TOOLS = ["compress", "decompress", "search_context", "acp_status"] as const;
@@ -22,7 +23,7 @@ export function resolveAgentDir(): string {
   const configured = process.env.PI_CODING_AGENT_DIR;
   if (configured === "~") return homedir();
   if (configured?.startsWith("~/")) return join(homedir(), configured.slice(2));
-  return configured || join(homedir(), ".pi", "agent");
+  return configured || join(homedir(), CONFIG_DIR_NAME, "agent");
 }
 
 export interface SetupResult {
