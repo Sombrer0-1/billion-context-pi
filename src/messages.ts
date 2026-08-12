@@ -100,7 +100,7 @@ function stringifyArgs(args: unknown): string {
   return safeStringify(args);
 }
 
-function extractText(content: unknown): string {
+export function extractText(content: unknown): string {
   if (typeof content === "string") return content.replace(REF_TAG, "");
   if (!Array.isArray(content)) return "";
   const parts: string[] = [];
@@ -111,6 +111,20 @@ function extractText(content: unknown): string {
     }
   }
   return parts.join("\n");
+}
+
+const TRUNCATION_MARKER = "[truncated for context space]";
+
+export function matchesStoredText(stored: string, visible: string): boolean {
+  const marker = `...${TRUNCATION_MARKER} — original ~`;
+  const markerStart = visible.indexOf(marker);
+  if (markerStart < 2 || visible.slice(markerStart - 2, markerStart) !== "\n\n") return false;
+  const suffixMarker = " tokens]...\n\n";
+  const suffixStart = visible.indexOf(suffixMarker, markerStart + marker.length);
+  if (suffixStart < 0 || !/^\d+$/.test(visible.slice(markerStart + marker.length, suffixStart))) return false;
+  const prefix = visible.slice(0, markerStart - 2);
+  const suffix = visible.slice(suffixStart + suffixMarker.length);
+  return prefix.length > 0 && suffix.length > 0 && stored.startsWith(prefix) && stored.endsWith(suffix);
 }
 
 function allToolCalls(content: unknown): { name: string; id: string; arguments?: unknown }[] {
