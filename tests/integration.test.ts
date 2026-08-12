@@ -1,5 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { rm, readFile } from "node:fs/promises";
 import { createAcpExtension } from "../src/index.js";
 
 // Mock Pi's ExtensionAPI — captures the event handlers the factory registers,
@@ -113,7 +114,8 @@ test("context handler works under omp (oh-my-pi) where sessionManager exposes ge
 test("omp context handler keeps the current (not-yet-persisted) user message: branch lags event.messages by one", async () => {
   const { api, handlers } = captureApi();
   createAcpExtension({ modelContextLimit: 200_000 })(api as any);
-
+  const stateFile = "/tmp/nonexistent-pai-acp-omp-lag.session.json";
+  await rm(`${stateFile}.acp.json`, { force: true });
   // Simulate omp's real timing: the branch only holds the PREVIOUS turn's
   // messages (the current user message is persisted only after the LLM call,
   // in message_end, which omp emits AFTER transformContext → emitContext).
@@ -123,11 +125,11 @@ test("omp context handler keeps the current (not-yet-persisted) user message: br
     { role: "user", content: [{ type: "text", text: "SECOND MESSAGE" }], timestamp: Date.now() },
   ];
   const ctx = {
-    ...fakeCtx(persisted, "/tmp/nonexistent-pai-acp-omp-lag.session.json"),
+    ...fakeCtx(persisted, stateFile),
     sessionManager: {
       getBranch: () => persisted,
       getSessionId: () => "test-session",
-      getSessionFile: () => "/tmp/nonexistent-pai-acp-omp-lag.session.json",
+      getSessionFile: () => stateFile,
     },
   };
 
@@ -183,6 +185,121 @@ test("omp live message keeps the same entry id once persisted (stable refs acros
   assert.ok(r2);
   assert.equal(r2.messages.length, 2, "both persisted and live messages must survive");
 });
+
+test("omp migrates tagged live refs to stable entry ids", async () => {
+  const { api, handlers } = captureApi();
+  createAcpExtension({ modelContextLimit: 200_000 })(api);
+  const stateFile = "/tmp/nonexistent-pai-acp-identity.session.json";
+  await rm(`${stateFile}.acp.json`, { force: true });
+  const texts = ["This tagged message must retain its stable persisted identity. ".repeat(130), "filler two ".repeat(400)];
+  let persisted: ReturnType<typeof userMsg>[] = [];
+  const ctx = { ...fakeCtx(persisted, stateFile), sessionManager: { getBranch: () => persisted, getSessionId: () => "test-session", getSessionFile: () => stateFile } };
+  const first = await handlers.get("context")![0]!({ type: "context", messages: texts.map((text) => ({ role: "user", content: [{ type: "text", text }], timestamp: Date.now() })) }, ctx);
+  const targetRef = first.messages[0].content.find((block: { type: string; text: string }) => block.type === "text").text.match(/m\d{5}/)![0];
+  persisted = texts.map((text, index) => userMsg(`e${index + 1}`, text));
+  await handlers.get("context")![0]!({ type: "context", messages: first.messages }, ctx);
+  const saved = JSON.parse(await readFile(`${stateFile}.acp.json`, "utf8"));
+  assert.equal(saved.messageRefs.byRaw.e1, targetRef);
+  assert.equal(saved.messageRefs.byRaw["live-0"], undefined);
+});
+
+test("omp matches a persisted context suffix before assigning live refs", async () => {
+  const { api, handlers } = captureApi();
+  createAcpExtension({ modelContextLimit: 200_000 })(api);
+  const stateFile = "/tmp/nonexistent-pai-acp-suffix.session.json";
+  await rm(`${stateFile}.acp.json`, { force: true });
+  const texts = ["This suffix message must retain its persisted identity. ".repeat(130), "filler two ".repeat(400)];
+  const persisted = [userMsg("older", "This older branch message is absent from provider context."), ...texts.map((text, index) => userMsg(`e${index + 1}`, text))];
+  const ctx = { ...fakeCtx(persisted, stateFile), sessionManager: { getBranch: () => persisted, getSessionId: () => "test-session", getSessionFile: () => stateFile } };
+  const transformed = await handlers.get("context")![0]!({ type: "context", messages: texts.map((text) => ({ role: "user", content: [{ type: "text", text }], timestamp: Date.now() })) }, ctx);
+  const targetRef = transformed.messages[0].content.find((block: { type: string; text: string }) => block.type === "text").text.match(/m\d{5}/)![0];
+  const saved = JSON.parse(await readFile(`${stateFile}.acp.json`, "utf8"));
+  assert.equal(saved.messageRefs.byRaw.e1, targetRef);
+  assert.equal(saved.messageRefs.byRaw["live-0"], undefined);
+});
+
+test("omp rejects a non-contiguous persisted subsequence", async () => {
+  const { api, handlers } = captureApi();
+  createAcpExtension({ modelContextLimit: 200_000 })(api);
+  const stateFile = "/tmp/nonexistent-pai-acp-gap.session.json";
+  await rm(`${stateFile}.acp.json`, { force: true });
+  const persisted = [userMsg("e1", "A"), userMsg("gap", "X"), userMsg("e2", "B")];
+  const ctx = fakeCtx(persisted, stateFile);
+  const result = await handlers.get("context")![0]!({ type: "context", messages: [
+    { role: "user", content: "A", timestamp: 1 },
+    { role: "user", content: "B", timestamp: 2 },
+  ] }, ctx);
+  const firstRef = result.messages[0].content.find((block: { type: string; text: string }) => block.type === "text").text.match(/m\d{5}/)![0];
+  const saved = JSON.parse(await readFile(`${stateFile}.acp.json`, "utf8"));
+  assert.equal(saved.messageRefs.byRaw.e1, undefined);
+  assert.equal(saved.messageRefs.byRaw["live-0"], firstRef);
+});
+
+test("omp migrates a live ref after the provider context evicts its prefix", async () => {
+  const { api, handlers } = captureApi();
+  createAcpExtension({ modelContextLimit: 200_000 })(api);
+  const stateFile = "/tmp/nonexistent-pai-acp-shifted-live-ref.session.json";
+  await rm(`${stateFile}.acp.json`, { force: true });
+  let persisted: ReturnType<typeof userMsg>[] = [];
+  const ctx = { ...fakeCtx(persisted, stateFile), sessionManager: { getBranch: () => persisted, getSessionId: () => "test-session", getSessionFile: () => stateFile } };
+  const first = await handlers.get("context")![0]!({ type: "context", messages: ["A", "B", "C"].map((text) => ({ role: "user", content: text, timestamp: Date.now() })) }, ctx);
+  const bRef = first.messages[1].content.find((block: { type: string; text: string }) => block.type === "text").text.match(/m\d{5}/)![0];
+  persisted = [userMsg("eA", "A"), userMsg("eB", "B"), userMsg("eC", "C")];
+  await handlers.get("context")![0]!({ type: "context", messages: [first.messages[1], first.messages[2]] }, ctx);
+  const saved = JSON.parse(await readFile(`${stateFile}.acp.json`, "utf8"));
+  assert.equal(saved.messageRefs.byRaw.eB, bRef);
+  assert.equal(saved.messageRefs.byRaw["live-1"], undefined);
+  assert.equal(saved.messageRefs.byRef[bRef], "eB");
+});
+type PersistedEntry = { type: "message"; id: string; parentId: null; timestamp: string; message: Record<string, unknown> };
+
+test("omp does not bind a different toolCallId with identical visible text to the persisted identity", async () => {
+  const { api, handlers } = captureApi();
+  createAcpExtension({ modelContextLimit: 200_000 })(api);
+  const stateFile = "/tmp/nonexistent-pai-acp-toolcallid.session.json";
+  await rm(`${stateFile}.acp.json`, { force: true });
+  const toolResult = (toolCallId: string) => ({
+    role: "toolResult",
+    toolName: "bash",
+    toolCallId,
+    content: [{ type: "text", text: "done" }],
+    isError: false,
+    timestamp: Date.now(),
+  });
+  let persisted: PersistedEntry[] = [];
+  const ctx = { ...fakeCtx(persisted, stateFile), sessionManager: { getBranch: () => persisted, getSessionId: () => "test-session", getSessionFile: () => stateFile } };
+  const first = await handlers.get("context")![0]!({ type: "context", messages: [toolResult("call-1")] }, ctx);
+  const targetRef = first.messages[0].content.find((block: { type: string; text: string }) => block.type === "text").text.match(/m\d{5}/)![0];
+  persisted = [{ type: "message", id: "e1", parentId: null, timestamp: "", message: toolResult("call-1") }];
+  await handlers.get("context")![0]!({ type: "context", messages: [toolResult("call-2")] }, ctx);
+  const saved = JSON.parse(await readFile(`${stateFile}.acp.json`, "utf8"));
+  assert.equal(saved.messageRefs.byRaw.e1, undefined, "a different toolCallId must not inherit the persisted identity");
+  assert.equal(saved.messageRefs.byRaw["live-0"], targetRef, "the live message keeps its own ref");
+});
+
+test("omp does not bind differing image content with identical visible text to the persisted identity", async () => {
+  const { api, handlers } = captureApi();
+  createAcpExtension({ modelContextLimit: 200_000 })(api);
+  const stateFile = "/tmp/nonexistent-pai-acp-image.session.json";
+  await rm(`${stateFile}.acp.json`, { force: true });
+  const imgMsg = (data: string) => ({
+    role: "user",
+    content: [
+      { type: "text", text: "see" },
+      { type: "image", data, mimeType: "image/png" },
+    ],
+    timestamp: Date.now(),
+  });
+  let persisted: PersistedEntry[] = [];
+  const ctx = { ...fakeCtx(persisted, stateFile), sessionManager: { getBranch: () => persisted, getSessionId: () => "test-session", getSessionFile: () => stateFile } };
+  const first = await handlers.get("context")![0]!({ type: "context", messages: [imgMsg("img-1")] }, ctx);
+  const targetRef = first.messages[0].content.find((block: { type: string; text: string }) => block.type === "text").text.match(/m\d{5}/)![0];
+  persisted = [{ type: "message", id: "e1", parentId: null, timestamp: "", message: imgMsg("img-1") }];
+  await handlers.get("context")![0]!({ type: "context", messages: [imgMsg("img-2")] }, ctx);
+  const saved = JSON.parse(await readFile(`${stateFile}.acp.json`, "utf8"));
+  assert.equal(saved.messageRefs.byRaw.e1, undefined, "different image data must not inherit the persisted identity");
+  assert.equal(saved.messageRefs.byRaw["live-0"], targetRef, "the live message keeps its own ref");
+});
 test("system prompt sources compression rules from acp-kernel (no hardcoded drift, no markers)", () => {
   const { api, handlers } = captureApi();
   createAcpExtension()(api as any);
@@ -214,6 +331,7 @@ test("context handler persists state so a second call is idempotent on the same 
   const entries = [userMsg("e1", "alpha"), userMsg("e2", "beta")];
   const ctx = fakeCtx(entries, "/tmp/nonexistent-pai-acp-it2.session.json");
 
+
   const first = await handlers.get("context")![0]!({ type: "context", messages: [] }, ctx);
   const second = await handlers.get("context")![0]!({ type: "context", messages: [] }, ctx);
 
@@ -221,6 +339,100 @@ test("context handler persists state so a second call is idempotent on the same 
   const tag1 = ((first.messages[0] as any).content as any[]).find((b: any) => b.type === "text" && b.text.startsWith("[m"));
   const tag2 = ((second.messages[0] as any).content as any[]).find((b: any) => b.type === "text" && b.text.startsWith("[m"));
   assert.equal(tag1?.text, tag2?.text, "refs stable across calls (loaded from persisted state)");
+});
+test("omp migrates assistant tool-call refs after prefix eviction", async () => {
+  const { api, handlers } = captureApi();
+  createAcpExtension({ modelContextLimit: 200_000 })(api);
+  const stateFile = "/tmp/nonexistent-pai-acp-assistant-origin.session.json";
+  await rm(`${stateFile}.acp.json`, { force: true });
+  const assistant = (id: string) => ({ role: "assistant", content: [{ type: "toolCall", id, name: "read", arguments: { path: "x" } }], timestamp: Date.now() });
+  let persisted: ReturnType<typeof userMsg>[] = [];
+  const ctx = { ...fakeCtx(persisted, stateFile), sessionManager: { getBranch: () => persisted, getSessionId: () => "test-session", getSessionFile: () => stateFile } };
+  await handlers.get("context")![0]!({ type: "context", messages: [assistant("call-a")] }, ctx);
+  const firstState = JSON.parse(await readFile(`${stateFile}.acp.json`, "utf8"));
+  const ref = firstState.messageRefs.byRaw["live-0"];
+  assert.ok(ref, "assistant temporary ref must be assigned");
+  persisted = [userMsg("older", "evicted"), { type: "message", id: "e-assistant", parentId: null, timestamp: "", message: assistant("call-a") }];
+  await handlers.get("context")![0]!({ type: "context", messages: [assistant("call-a")] }, ctx);
+  const saved = JSON.parse(await readFile(`${stateFile}.acp.json`, "utf8"));
+  assert.equal(saved.messageRefs.byRaw["e-assistant"], ref);
+  assert.equal(saved.messageRefs.byRaw["live-0"], undefined);
+});
+
+test("omp migrates parallel assistant tool-call child refs after prefix eviction", async () => {
+  const { api, handlers } = captureApi();
+  createAcpExtension({ modelContextLimit: 200_000 })(api);
+  const stateFile = "/tmp/nonexistent-pai-acp-parallel-origin.session.json";
+  await rm(`${stateFile}.acp.json`, { force: true });
+  const assistant = () => ({ role: "assistant", content: [
+    { type: "text", text: "parallel" },
+    { type: "toolCall", id: "call-a", name: "read", arguments: { path: "a" } },
+    { type: "toolCall", id: "call-b", name: "write", arguments: { path: "b" } },
+  ], timestamp: Date.now() });
+  let persisted: ReturnType<typeof userMsg>[] = [];
+  const ctx = { ...fakeCtx(persisted, stateFile), sessionManager: { getBranch: () => persisted, getSessionId: () => "test-session", getSessionFile: () => stateFile } };
+  await handlers.get("context")![0]!({ type: "context", messages: [assistant()] }, ctx);
+  const first = JSON.parse(await readFile(`${stateFile}.acp.json`, "utf8"));
+  const callARef = first.messageRefs.byRaw["live-0#call-a"];
+  const callBRef = first.messageRefs.byRaw["live-0#call-b"];
+  assert.ok(callARef && callBRef);
+  persisted = [{ type: "message", id: "e-assistant", parentId: null, timestamp: "", message: assistant() }];
+  await handlers.get("context")![0]!({ type: "context", messages: [assistant()] }, ctx);
+  const saved = JSON.parse(await readFile(`${stateFile}.acp.json`, "utf8"));
+  assert.equal(saved.messageRefs.byRaw["e-assistant#call-a"], callARef);
+  assert.equal(saved.messageRefs.byRaw["e-assistant#call-b"], callBRef);
+  assert.equal(saved.messageRefs.byRaw["live-0#call-a"], undefined);
+  assert.equal(saved.messageRefs.byRaw["live-0#call-b"], undefined);
+});
+
+test("omp reloads assistant origins before migrating after prefix eviction", async () => {
+  const stateFile = "/tmp/nonexistent-pai-acp-assistant-reload.session.json";
+  await rm(`${stateFile}.acp.json`, { force: true });
+  const assistant = (id: string) => ({ role: "assistant", content: [{ type: "toolCall", id, name: "read", arguments: { path: "x" } }], timestamp: Date.now() });
+  let persisted: ReturnType<typeof userMsg>[] = [];
+  const makeCtx = () => ({ ...fakeCtx(persisted, stateFile), sessionManager: { getBranch: () => persisted, getSessionId: () => "test-session", getSessionFile: () => stateFile } });
+  const first = captureApi();
+  createAcpExtension({ modelContextLimit: 200_000 })(first.api);
+  await first.handlers.get("context")![0]!({ type: "context", messages: [assistant("call-a")] }, makeCtx());
+  const initial = JSON.parse(await readFile(`${stateFile}.acp.json`, "utf8"));
+  const ref = initial.messageRefs.byRaw["live-0"];
+  assert.ok(ref);
+  const second = captureApi();
+  createAcpExtension({ modelContextLimit: 200_000 })(second.api);
+  persisted = [{ type: "message", id: "e-assistant", parentId: null, timestamp: "", message: assistant("call-a") }];
+  await second.handlers.get("context")![0]!({ type: "context", messages: [assistant("call-a")] }, makeCtx());
+  const saved = JSON.parse(await readFile(`${stateFile}.acp.json`, "utf8"));
+  assert.equal(saved.messageRefs.byRaw["e-assistant"], ref);
+  assert.equal(saved.messageRefs.byRaw["live-0"], undefined);
+  assert.equal(saved.messageRefs.byRef[ref], "e-assistant");
+});
+
+test("omp preserves stable destination when migrating a colliding live ref", async () => {
+  const stateFile = "/tmp/nonexistent-pai-acp-collision.session.json";
+  await rm(`${stateFile}.acp.json`, { force: true });
+  const assistant = (id: string) => ({ role: "assistant", content: [{ type: "toolCall", id, name: "read", arguments: { path: "x" } }], timestamp: Date.now() });
+  let persisted: ReturnType<typeof userMsg>[] = [];
+  const makeCtx = () => ({ ...fakeCtx(persisted, stateFile), sessionManager: { getBranch: () => persisted, getSessionId: () => "test-session", getSessionFile: () => stateFile } });
+  const first = captureApi();
+  createAcpExtension({ modelContextLimit: 200_000 })(first.api);
+  await first.handlers.get("context")![0]!({ type: "context", messages: [assistant("call-a")] }, makeCtx());
+  const initial = JSON.parse(await readFile(`${stateFile}.acp.json`, "utf8"));
+  const liveRef = initial.messageRefs.byRaw["live-0"];
+  assert.ok(liveRef);
+  const stableRef = "m09999";
+  initial.messageRefs.byRaw["e-assistant"] = stableRef;
+  initial.messageRefs.byRef[stableRef] = "e-assistant";
+  const { writeFile } = await import("node:fs/promises");
+  await writeFile(`${stateFile}.acp.json`, JSON.stringify(initial), "utf8");
+  const second = captureApi();
+  createAcpExtension({ modelContextLimit: 200_000 })(second.api);
+  persisted = [{ type: "message", id: "e-assistant", parentId: null, timestamp: "", message: assistant("call-a") }];
+  await second.handlers.get("context")![0]!({ type: "context", messages: [assistant("call-a")] }, makeCtx());
+  const saved = JSON.parse(await readFile(`${stateFile}.acp.json`, "utf8"));
+  assert.equal(saved.messageRefs.byRaw["e-assistant"], stableRef);
+  assert.equal(saved.messageRefs.byRef[stableRef], "e-assistant");
+  assert.equal(saved.messageRefs.byRaw["live-0"], undefined);
+  assert.equal(saved.messageRefs.byRef[liveRef], undefined);
 });
 
 test("delegate:false omits the ACP_DELEGATE NOTIFICATIONS section from the system prompt", () => {
