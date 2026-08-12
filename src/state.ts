@@ -14,6 +14,9 @@ export async function readParentSessionPath(sessionFile: string): Promise<string
   try {
     const handle = await fs.open(sessionFile, "r");
     try {
+      // 64KB cap: Pi's own header scan uses 1MB but real headers are ~200 bytes.
+      // Only the first line (JSON header) is needed; the buffer is deliberately
+      // oversized to handle cwd paths up to PATH_MAX (~4KB).
       const buf = Buffer.alloc(65536);
       const { bytesRead } = await handle.read(buf, 0, buf.length, 0);
       if (bytesRead === 0) return undefined;
@@ -24,7 +27,11 @@ export async function readParentSessionPath(sessionFile: string): Promise<string
     } finally {
       await handle.close();
     }
-  } catch {
+  } catch (e) {
+    const code = (e as NodeJS.ErrnoException).code;
+    if (code !== "ENOENT") {
+      logWarn("state", { event: "read-parent-header-failed", file: sessionFile, error: e instanceof Error ? e.message : String(e) });
+    }
     return undefined;
   }
 }
@@ -44,12 +51,17 @@ export class SessionStateStore {
         if (parsed && Array.isArray(parsed.blocks)) state = mergeInitialState(parsed);
       } catch (e) {
         const code = (e as NodeJS.ErrnoException).code;
-        if (code === "ENOENT" && sessionFile) {
-          const parentState = await this.tryLoadParentState(sessionFile);
-          if (parentState) state = parentState;
-        } else if (code !== "ENOENT") {
+        if (code !== "ENOENT") {
           logWarn("state", { event: "load-failed", file, error: e instanceof Error ? e.message : String(e) });
         }
+      }
+      // Inherit from parent when own state has no compression blocks.
+      // Covers two cases: (1) ENOENT — file doesn't exist yet (new clone);
+      // (2) empty blocks — file exists but was poisoned by a pre-fix resume
+      // that saved createInitialState() before inheritance was added.
+      if (state.blocks.length === 0 && sessionFile) {
+        const parentState = await this.tryLoadParentState(sessionFile);
+        if (parentState) state = parentState;
       }
     }
     this.cache = state;
