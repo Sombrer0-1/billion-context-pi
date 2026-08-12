@@ -653,7 +653,7 @@ async function runDelegate(
           debug.event("delegate-watchdog", { runId, reason });
         },
         onEofGrace: () => {
-          run.timedOut = "output ended but process did not exit";
+          if (!run.agentSettled) run.timedOut = "output ended but process did not exit";
           debug.event("delegate-eof-grace", { runId, ms: EOF_GRACE_MS });
         },
       },
@@ -777,7 +777,7 @@ async function runDelegate(
           }
           const mode = delegateDisplayUsage;
           const injected = injectResult(pi, args.agent, runId, args.task, code, file, run.timedOut, run.usage, mode, run.usageReported);
-          if (injected && run.usage && !run.usageReported) {
+          if (run.usage && !run.usageReported && (mode === "separate" || injected)) {
             run.usageReported = true;
           }
           run.injected = injected;

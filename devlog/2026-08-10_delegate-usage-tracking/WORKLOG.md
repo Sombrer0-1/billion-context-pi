@@ -25,7 +25,8 @@
 
 | Commit | Description |
 |--------|-------------|
-| `8fdb60d` | feat: track delegate LLM usage + separate display mode (#105) |
+| `7edc762` | feat: track delegate LLM usage + separate display mode (#105) |
+| `8fdb60d` | merge of `origin/master` into the PR branch (the branch tip merged at `1bf6bb4`) |
 
 ### Merge resolution (by maintainer side)
 
@@ -33,10 +34,10 @@ The PR was opened against an older master. After `#121/#123/#124/#125` landed,
 it conflicted. Resolved in merge commit `1bf6bb4` (parents `[8fdb60d, 4c058eb]`),
 pushed to the author's fork `Tyan66666:fix/105-delegate-usage-tracking`.
 
-### Post-review fixes (R1 + R2)
+### Post-review fixes
 
-A cross-platform/regression review (oracle) found two minor issues, both fixed
-in a follow-up commit on `resolve-pr106`:
+A cross-platform/regression review found minor issues, all fixed in follow-up
+commits on `resolve-pr106`:
 
 - **R1 — footer `setStatus` churned every 500ms tick when there was no usage**
   (`src/footer-status.ts`). The dedup compared `text` against `lastFooterText`,
@@ -44,27 +45,47 @@ in a follow-up commit on `resolve-pr106`:
   comparison, so the empty state never matched. Fix: compare `(text ?? "")` on
   both sides, and reset `lastFooterText` to `undefined` in `initFooterStatus`
   so the first refresh of each session always fires (defensive clear) while
-  subsequent identical ticks dedup. All `footer-status.test.ts` cases still pass.
-- **R2 — a post-`agent_settled` force-kill was mislabeled `(timed out: ...)`**
-  (`src/delegate-tool.ts`). After `agent_settled` the agent flow is complete and
-  the reply is already streamed, so a watchdog kill is stuck teardown, not a
-  timeout. Fix: track `run.agentSettled` (set in the `onSettled` callback); in
-  `onKill`, only set `run.timedOut` when `!run.agentSettled`. The watchdog
-  interface and `delegate-watchdog.ts` are unchanged (localized to
-  `delegate-tool.ts`); `watchdog.test.ts` unaffected.
+  subsequent identical ticks dedup.
+- **R2 (onKill) — a post-`agent_settled` force-kill was mislabeled
+  `(timed out: ...)`** (`src/delegate-tool.ts`). After `agent_settled` the agent
+  flow is complete and the reply is already streamed, so a watchdog kill is stuck
+  teardown, not a timeout. Fix: track `run.agentSettled` (set in the `onSettled`
+  callback); in `onKill`, only set `run.timedOut` when `!run.agentSettled`.
+  Localized to `delegate-tool.ts`; `watchdog.test.ts` unaffected.
+- **R2 (onEofGrace) — the same mislabel also affected the EOF-grace path**
+  (`src/delegate-tool.ts`). `onEofGrace` set `run.timedOut` unconditionally, so a
+  post-`agent_settled` teardown where stdout closed but the process lingered
+  could still be labeled a timeout. Fix: mirror the `if (!run.agentSettled)`
+  guard in `onEofGrace`.
+- **Usage double-count on inject failure** (`src/delegate-tool.ts`). In
+  `separate` mode `addDelegateUsage` runs before the `send.call` try, but
+  `usageReported` was only set when `injected` succeeded; a later `wait` on a
+  finished-but-not-injected run re-accumulated. Fix: set `usageReported` whenever
+  the terminal inject path ran and usage was accounted/delivered
+  (`mode === "separate" || injected`).
+- **R4 — `displayUsage` side-channel** (`src/index.ts`, `src/delegate-tool.ts`).
+  Replaced `(pi as unknown as Record<string, unknown>).displayUsage` reads/write
+  with a module-level `delegateDisplayUsage` + `setDelegateDisplayUsage()` setter,
+  called in `session_start`. A default reset (`"separate"`) runs before the
+  config-load try so a config-load failure can't leak a stale mode from a prior
+  session.
+- **R9 — regression tests**: footer churn-dedup (`tests/footer-status.test.ts`),
+  CRLF line tolerance + partial-usage-fills-0 (`tests/events.test.ts`).
 
 ### Key Files
 
-- `src/delegate-events.ts` — NEW. `Usage` interface, `handleMessageEnd`,
-  `usage-update` / `agent_settled` event parsing.
+- `src/delegate-events.ts` — modified (pre-existed on master). Added `Usage`
+  interface, `handleMessageEnd`, `usage-update` / `agent_settled` event parsing.
 - `src/delegate-tool.ts` — `makeEventApplier` (master refactor) extended with
   `onUsage` / `onSettled` callbacks; `accumulateUsage`; `buildChildArgs`;
   `delegateSpawnOptions`; usage returned from wait/cancel.
-- `src/delegate-watchdog.ts` — NEW. `attachWatchdogs` + `settledGrace` (reuses
-  existing SIGTERM→SIGKILL escalation).
-- `src/footer-status.ts` — NEW. `sub-agents ↑in ↓out ($cost)` footer line.
+- `src/delegate-watchdog.ts` — modified (pre-existed on master). Added
+  `settledGrace` to `attachWatchdogs` (reuses existing SIGTERM→SIGKILL
+  escalation).
+- `src/footer-status.ts` — NEW (genuinely new file). `sub-agents ↑in ↓out ($cost)`
+  footer line.
 - `src/index.ts` — `/acp-status` delegate usage section; `resetDelegateUsage()`
-  on reload/restart.
+  + `setDelegateDisplayUsage("separate")` on `session_start` / reload / restart.
 
 ## 3. Design & Implementation Notes
 
@@ -86,24 +107,26 @@ in a follow-up commit on `resolve-pr106`:
 
 ```sh
 npm run typecheck   # 0 errors
-npm test            # 230 pass / 0 fail
+npm test            # 233 pass / 0 fail
 npm run build       # success
 ```
 
 - New/modified test files: `tests/delegate-tool.test.ts`, `tests/events.test.ts`,
   `tests/watchdog.test.ts`, `tests/footer-status.test.ts`.
-- Test count: 230 total, 230 pass, 0 fail (master 211 + #106 net new).
+- Test count: 233 total, 233 pass, 0 fail (master 211 + #106 net new).
 - `pr-validation` fails only on the `fix/...` branch name (regex requires
   `YYYY-MM-DD_...`); overridden at merge, same as the other recent PRs.
 
 ## 5. Risk Assessment & Rollback
 
 - **Risk points**:
-  - Malformed/missing usage fields — see the cross-platform/regression review.
+  - Malformed/missing usage fields — handled by `safeNumber` / `safeCost` (fill 0);
+    covered by `tests/events.test.ts`.
   - `agent_settled` force-kill could theoretically hit a legitimately slow
     teardown; mitigated by the 10s grace + the fact Pi emits `agent_settled`
     only after the agent flow is fully done. The misleading `(timed out: ...)`
-    label for such kills is now suppressed via `run.agentSettled` (see R2).
+    label for such kills is suppressed via `run.agentSettled` on both the
+    `onKill` and `onEofGrace` paths (see R2).
   - Cross-platform: process kill reuses the existing SIGTERM→SIGKILL
     `killByWatchdog` (SIGKILL is reliable on Windows); the new `settledGrace`
     path adds no new signal behavior.

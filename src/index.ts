@@ -64,6 +64,7 @@ function wireSessionLifecycle(pi: ExtensionAPI, runtime: AcpRuntime): void {
     runtime.store.invalidate();
     runtime.clearNudgeTracking();
     resetDelegateUsage();
+    setDelegateDisplayUsage("separate");
     const sid = ctx.sessionManager.getSessionId();
     logInfo("session", { event: "start", sid, cwd: ctx.cwd, debug: runtime.adapter.debug ?? null, version: typeof CURRENT_VERSION !== "undefined" ? CURRENT_VERSION : null });
     try {
