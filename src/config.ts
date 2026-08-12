@@ -23,6 +23,12 @@ export interface AdapterConfig {
    *  section. Default: true. Set `delegate: false` (adapter config or
    *  ~/.pi/acp.json) to skip registering them. */
   delegate?: boolean;
+  /** How to display delegate usage in session totals.
+   *  "merged" — delegate usage is added to main session totals (Pi default).
+   *  "separate" — delegate usage is tracked separately, displayed in
+   *               system notifications (excluded from main session totals).
+   *  Default: "separate" */
+  displayUsage?: "merged" | "separate";
   /** Default timeout in seconds injected into the bash tool when the model
    *  omits `timeout`. Pi has NO built-in default, so without this a command
    *  that the model forgets to time out can hang for thousands of seconds.

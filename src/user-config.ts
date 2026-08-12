@@ -13,6 +13,7 @@ export interface UserAcpConfig {
   autoUpdate?: boolean;
   modelContextLimit?: number;
   delegate?: boolean;
+  displayUsage?: "merged" | "separate";
   toolBashDefaultTimeout?: number;
   toolOutputMaxBytes?: number;
 }
@@ -45,7 +46,7 @@ function join(... parts: string[]): string {
   return path.join(...parts);
 }
 
-const KNOWN = new Set(["debug", "autoUpdate", "modelContextLimit", "delegate", "toolBashDefaultTimeout", "toolOutputMaxBytes"]);
+const KNOWN = new Set(["debug", "autoUpdate", "modelContextLimit", "delegate", "displayUsage", "toolBashDefaultTimeout", "toolOutputMaxBytes"]);
 
 function pickKnown(parsed: Record<string, unknown>): UserAcpConfig {
   const out: UserAcpConfig = {};

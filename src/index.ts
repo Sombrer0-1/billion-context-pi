@@ -12,7 +12,7 @@ import { makeCompressTool } from "./compress-tool.js";
 import { makeDecompressTool } from "./decompress-tool.js";
 import { makeSearchTool } from "./search-tool.js";
 import { makeStatusTool } from "./status-tool.js";
-import { makeDelegateTool, makeDelegateWaitTool, makeDelegateCancelTool, runningRunsSnapshot } from "./delegate-tool.js";
+import { makeDelegateTool, makeDelegateWaitTool, makeDelegateCancelTool, runningRunsSnapshot, resetDelegateUsage, setDelegateDisplayUsage } from "./delegate-tool.js";
 import { makeCommands } from "./commands.js";
 import { coreOutToAgentMessages } from "./messages.js";
 import { ACP_SYSTEM_PROMPT, ACP_DELEGATE_PROMPT } from "./system-prompt.js";
@@ -63,11 +63,14 @@ function wireSessionLifecycle(pi: ExtensionAPI, runtime: AcpRuntime): void {
   pi.on("session_start", async (_event, ctx) => {
     runtime.store.invalidate();
     runtime.clearNudgeTracking();
+    resetDelegateUsage();
+    setDelegateDisplayUsage("separate");
     const sid = ctx.sessionManager.getSessionId();
     logInfo("session", { event: "start", sid, cwd: ctx.cwd, debug: runtime.adapter.debug ?? null, version: typeof CURRENT_VERSION !== "undefined" ? CURRENT_VERSION : null });
     try {
       const user = await loadUserConfig(ctx.cwd);
       runtime.setAdapter(applyUserConfig(runtime.adapter, user));
+      setDelegateDisplayUsage(runtime.adapter.displayUsage ?? "separate");
       if (runtime.adapter.debug !== undefined) setDebugEnabled(runtime.adapter.debug);
     } catch (e) {
       logThrow("config", e, { sid, phase: "session_start" });
