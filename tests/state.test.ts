@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import * as path from "node:path";
-import { SessionStateStore } from "../src/state.js";
+import { SessionStateStore, readParentSessionPath } from "../src/state.js";
 import { createInitialState } from "acp-kernel";
 
 function tempDir(): Promise<string> {
