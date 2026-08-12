@@ -86,3 +86,20 @@ test("disposeFooterStatus clears the status and detaches ui", () => {
   updateFooterStatus();
   assert.equal(mock.calls.length, 1, "no setStatus after dispose");
 });
+
+test("updateFooterStatus does not churn setStatus across repeated empty ticks", () => {
+  const mock = makeMock();
+  resetDelegateUsage();
+  initFooterStatus(mock.ctx);
+  updateFooterStatus();
+  updateFooterStatus();
+  updateFooterStatus();
+  assert.equal(mock.calls.length, 1, "repeated empty ticks setStatus once (dedup)");
+  assert.deepEqual(mock.calls[0], ["billion-context-pi", undefined]);
+  addDelegateUsage(USAGE);
+  updateFooterStatus();
+  updateFooterStatus();
+  assert.equal(mock.calls.length, 2, "usage change fires once more then dedups");
+  assert.deepEqual(mock.calls[1], ["billion-context-pi", "sub-agents \u219112k \u219331 ($0.0016)"]);
+  disposeFooterStatus();
+});

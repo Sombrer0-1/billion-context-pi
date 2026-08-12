@@ -206,3 +206,26 @@ test("activityLines ignores agent-settled events", () => {
   assert.deepEqual(activityLines(ev, { showThinking: false }), []);
   assert.deepEqual(activityLines(ev, { showThinking: true }), []);
 });
+
+test("parseEventLine tolerates trailing CR (CRLF line endings)", () => {
+  assert.deepEqual(parseEventLine('{"type":"agent_settled"}\r'), { kind: "agent-settled" });
+  assert.deepEqual(
+    parseEventLine('{"type":"message_update","assistantMessageEvent":{"type":"thinking_end","contentIndex":0}}\r'),
+    { kind: "thinking-end" },
+  );
+  assert.deepEqual(
+    parseEventLine('{"type":"message_end","message":{"role":"assistant","usage":{"input":150,"output":80,"cacheRead":0,"cacheWrite":0,"totalTokens":230}}}\r'),
+    { kind: "usage-update", usage: { input: 150, output: 80, cacheRead: 0, cacheWrite: 0, cacheWrite1h: undefined, reasoning: undefined, totalTokens: 230, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } } },
+  );
+});
+
+test("message_end with partial usage fills missing numeric fields with 0", () => {
+  const ev = parseEventLine('{"type":"message_end","message":{"role":"assistant","usage":{"input":150,"totalTokens":150}}}') as { kind: "usage-update"; usage: Record<string, unknown> };
+  assert.equal(ev.kind, "usage-update");
+  assert.equal(ev.usage.input, 150);
+  assert.equal(ev.usage.output, 0);
+  assert.equal(ev.usage.cacheRead, 0);
+  assert.equal(ev.usage.cacheWrite, 0);
+  assert.equal(ev.usage.totalTokens, 150);
+  assert.deepEqual(ev.usage.cost, { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 });
+});

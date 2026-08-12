@@ -147,6 +147,12 @@ export function resetDelegateUsage(): void {
   delegateUsageTotal = undefined;
 }
 
+let delegateDisplayUsage: "merged" | "separate" = "separate";
+
+export function setDelegateDisplayUsage(mode: "merged" | "separate"): void {
+  delegateDisplayUsage = mode;
+}
+
 
 /** Snapshot of currently-running delegate runs, for the TUI status widget. */
 export function runningRunsSnapshot(): { runId: string; agent: string; task: string; startedAt: number }[] {
@@ -478,7 +484,7 @@ export function makeDelegateWaitTool(_pi: ExtensionAPI): ToolDefinition<typeof W
       }
       // Already finished (e.g. the model calls wait after the injected
       // notification, or the run was cancelled).
-      const displayMode = ((_pi as unknown as Record<string, unknown>).displayUsage ?? "separate") as "merged" | "separate";
+      const displayMode = delegateDisplayUsage;
       if (run.status === "cancelled") {
         run.consumed = true;
         return buildWaitResult(run, `Delegate \`${args.runId}\` was cancelled (no result).${remainingLineForWait(args.runId)}`, displayMode);
@@ -576,7 +582,7 @@ export function makeDelegateCancelTool(_pi: ExtensionAPI): ToolDefinition<typeof
         logError("delegate", { event: "cancel-kill-error", runId, error: String(err) });
       }
       delegateStatusWidget.poke();
-      const displayMode = ((_pi as unknown as Record<string, unknown>).displayUsage ?? "separate") as "merged" | "separate";
+      const displayMode = delegateDisplayUsage;
       return buildCancelResult(run, `Cancelled ${runId} (${run.agent}).`, displayMode);
     },
   };
@@ -769,7 +775,7 @@ async function runDelegate(
             delegateStatusWidget.poke();
             return;
           }
-          const mode = ((pi as unknown as Record<string, unknown>).displayUsage ?? "separate") as "merged" | "separate";
+          const mode = delegateDisplayUsage;
           const injected = injectResult(pi, args.agent, runId, args.task, code, file, run.timedOut, run.usage, mode, run.usageReported);
           if (injected && run.usage && !run.usageReported) {
             run.usageReported = true;
