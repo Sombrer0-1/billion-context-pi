@@ -2,6 +2,7 @@ import { promises as fs } from "node:fs";
 import * as path from "node:path";
 import { homedir } from "node:os";
 import { CONFIG_DIR_NAME } from "@earendil-works/pi-coding-agent";
+import type { Prompts } from "acp-kernel";
 import type { AdapterConfig, CompressConfig, DelegateConfig } from "./config.js";
 import { debug, logWarn } from "./log.js";
 
@@ -17,6 +18,8 @@ export interface UserAcpConfig {
   delegate?: boolean | DelegateConfig;
   compress?: CompressConfig;
   displayUsage?: "merged" | "separate";
+  prompts?: Partial<Prompts>;
+  acknowledgePromptsRisk?: boolean;
 }
 
 /** Read global + project acp.json, project overrides global. Returns {} on any
@@ -51,6 +54,7 @@ const KNOWN = new Set([
   "debug", "autoUpdate", "modelContextLimit",
   "toolBashDefaultTimeout", "toolOutputMaxBytes",
   "delegate", "compress", "displayUsage",
+  "prompts", "acknowledgePromptsRisk",
 ]);
 
 function pickKnown(parsed: Record<string, unknown>): UserAcpConfig {

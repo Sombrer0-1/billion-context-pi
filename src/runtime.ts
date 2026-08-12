@@ -2,9 +2,11 @@ import type { ExtensionContext, SessionEntry, SessionMessageEntry } from "@earen
 import {
   createCore,
   defaultCountTokens,
+  defaultPrompts,
   type CompressionCore,
   type CompressionState,
   type Config,
+  type Prompts,
 } from "acp-kernel";
 import { resolveConfig, type AdapterConfig } from "./config.js";
 import { entriesToCoreMessages, extractText, matchesStoredText, messageIdentity, messageRef } from "./messages.js";
@@ -35,6 +37,8 @@ export interface AcpRuntime {
   store: SessionStateStore;
   adapter: AdapterConfig;
   setAdapter(adapter: AdapterConfig): void;
+  prompts: Prompts;
+  setPrompts(prompts: Prompts): void;
   markNudgeShown(turnKey: string): void;
   nudgeShownFor(turnKey: string): boolean;
   clearNudgeTracking(): void;
@@ -169,6 +173,7 @@ export function createRuntime(adapter: AdapterConfig): AcpRuntime {
   const store = new SessionStateStore();
   const locks = new Map<string, Promise<void>>();
   let adapterRef = adapter;
+  let promptsRef: Prompts = defaultPrompts;
   const nudgeShownTurns = new Set<string>();
 
   async function acquireLock(sid: string): Promise<() => void> {
@@ -222,5 +227,5 @@ export function createRuntime(adapter: AdapterConfig): AcpRuntime {
     await store.save(state, sm.getSessionFile() ?? undefined, sm.getSessionId());
   }
 
-  return { core, store, get adapter() { return adapterRef; }, setAdapter: (a) => { adapterRef = a; }, markNudgeShown: (k) => { nudgeShownTurns.add(k); }, nudgeShownFor: (k) => nudgeShownTurns.has(k), clearNudgeTracking: () => { nudgeShownTurns.clear(); }, liveContextLimit, configFor, stateFor, save, acquireLock };
+  return { core, store, get adapter() { return adapterRef; }, setAdapter: (a) => { adapterRef = a; }, get prompts() { return promptsRef; }, setPrompts: (p) => { promptsRef = p; }, markNudgeShown: (k) => { nudgeShownTurns.add(k); }, nudgeShownFor: (k) => nudgeShownTurns.has(k), clearNudgeTracking: () => { nudgeShownTurns.clear(); }, liveContextLimit, configFor, stateFor, save, acquireLock };
 }

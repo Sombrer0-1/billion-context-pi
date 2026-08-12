@@ -1,11 +1,7 @@
-import {
-  COMPRESS_PHILOSOPHY,
-  HOW_TO_COMPRESS_RULES,
-  TIER2_DISTILL_RULES,
-  TIER3_CONDENSE_RULES,
-} from "acp-kernel";
+import type { Prompts } from "acp-kernel";
 
-export const ACP_SYSTEM_PROMPT = `
+export function buildAcpSystemPrompt(prompts: Prompts): string {
+  return `
 ACP context management
 
 ACP TAGS
@@ -29,7 +25,7 @@ You have four context-management tools:
 - search_context — Search compressed block summaries (and optionally visible messages) by keyword. Use BEFORE decompressing to find the right block. Example: search_context({ query: "auth token refresh" }).
 - acp_status — Context status with compressible ranges. No args = overview + totals. scope:"uncompressed" for range view; add view:"messages" for per-message listing. scope:"compressed" for block details.
 
-${COMPRESS_PHILOSOPHY}
+${prompts.compressPhilosophy}
 
 WHEN TO COMPRESS
 
@@ -47,7 +43,7 @@ WHEN NOT TO COMPRESS
 - Important user messages — preserve their exact intent, constraints, and acceptance criteria. If a message in the range must stay verbatim, exclude it from the compress range instead of compressing it.
 - Protected tool outputs — hard-excluded from compression ranges, survive intact in visible context.
 
-${HOW_TO_COMPRESS_RULES}
+${prompts.howToCompressRules}
 
 MULTI-TIER COMPRESSION
 
@@ -55,9 +51,9 @@ Summaries accumulate as the session grows. When tier-1 summaries pile up, the sy
 
 To compress blocks: use block IDs as boundaries: compress({ content: [{ startId: "b3", endId: "b15", summary: "..." }] }). This deactivates the consumed blocks and creates a new higher-tier block.
 
-${TIER2_DISTILL_RULES}
+${prompts.tier2DistillRules}
 
-${TIER3_CONDENSE_RULES}
+${prompts.tier3CondenseRules}
 
 THE PHILOSOPHY OF DECOMPRESS
 
@@ -66,7 +62,8 @@ decompress restores previously compressed content and writes it to a file by def
 CONTEXT BREAKDOWN
 
 When context usage passes a threshold, the system appends a breakdown showing where tokens are spent. Compress the largest ranges first when the current step no longer needs them.
-`;
+  `;
+}
 
 export const ACP_DELEGATE_PROMPT = `
 ACP_DELEGATE NOTIFICATIONS

@@ -4,8 +4,8 @@ import type {
   ExtensionFactory,
   SessionMessageEntry,
 } from "@earendil-works/pi-coding-agent";
-import type { CoreMessage, NudgeDecision, CompressionBlock } from "acp-kernel";
-import { renderNudgeText } from "acp-kernel";
+import type { CoreMessage, NudgeDecision, CompressionBlock, Prompts } from "acp-kernel";
+import { renderNudgeText, resolvePrompts, defaultPrompts } from "acp-kernel";
 import { type AdapterConfig, resolveDelegate } from "./config.js";
 import { createRuntime, type AcpRuntime } from "./runtime.js";
 import { makeCompressTool } from "./compress-tool.js";
@@ -15,7 +15,7 @@ import { makeStatusTool } from "./status-tool.js";
 import { makeDelegateTool, makeDelegateWaitTool, makeDelegateCancelTool, runningRunsSnapshot, resetDelegateUsage, setDelegateDisplayUsage } from "./delegate-tool.js";
 import { makeCommands } from "./commands.js";
 import { coreOutToAgentMessages } from "./messages.js";
-import { ACP_SYSTEM_PROMPT, ACP_DELEGATE_PROMPT } from "./system-prompt.js";
+import { buildAcpSystemPrompt, ACP_DELEGATE_PROMPT } from "./system-prompt.js";
 import { delegateStatusWidget } from "./fleet-widget.js";
 import { wireToolGuardrails } from "./tool-guardrails.js";
 import { debug, setDebugEnabled, logError, logInfo, logWarn, logThrow, closeLogStream } from "./log.js";
@@ -74,6 +74,12 @@ function wireSessionLifecycle(pi: ExtensionAPI, runtime: AcpRuntime): void {
       if (runtime.adapter.debug !== undefined) setDebugEnabled(runtime.adapter.debug);
     } catch (e) {
       logThrow("config", e, { sid, phase: "session_start" });
+    }
+    try {
+      runtime.setPrompts(resolvePrompts(runtime.adapter.prompts, { acknowledgeRisk: runtime.adapter.acknowledgePromptsRisk === true }));
+    } catch (e) {
+      logWarn("config", { event: "prompts-resolve-failed", error: e instanceof Error ? e.message : String(e) });
+      runtime.setPrompts(defaultPrompts);
     }
     if (resolveDelegate(runtime.adapter).enabled) {
       pi.registerTool(makeDelegateTool(pi));
@@ -155,7 +161,7 @@ function wireContextTransform(pi: ExtensionAPI, runtime: AcpRuntime): void {
         prunedMsgs: coreMessages.length - turn.messages.length + turn.messages.filter((m) => m.id.startsWith("acp_summary")).length,
         nudgeShouldInject: turn.nudge?.shouldInject ?? false,
         nudgeReason: turn.nudge?.reason ?? null,
-        nudgeVoice: turn.nudge ? renderNudgeText(turn.nudge).voice : null,
+        nudgeVoice: turn.nudge ? renderNudgeText(turn.nudge, runtime.prompts).voice : null,
       nudgePct: turn.nudge ? Math.round(turn.nudge.contextUsage * 100) : null,
       nudgeTier: turn.nudge?.tier ?? null,
       nudgeCompressibleCount: turn.nudge?.compressibleRanges.length ?? 0,
@@ -187,8 +193,8 @@ function wireContextTransform(pi: ExtensionAPI, runtime: AcpRuntime): void {
       const turnKey = lastUserMessageId(entries) ?? sid;
       const alreadyShown = !emergency && runtime.nudgeShownFor(turnKey);
       if (!alreadyShown) {
-        rebuilt.push(nudgeMessage(turn.nudge, turn.state.blocks.filter((b) => b.active)));
-        const rendered = renderNudgeText(turn.nudge);
+        rebuilt.push(nudgeMessage(turn.nudge, turn.state.blocks.filter((b) => b.active), runtime.prompts));
+        const rendered = renderNudgeText(turn.nudge, runtime.prompts);
         const top = [...turn.nudge.compressibleRanges].sort((a, b) => b.tokens - a.tokens)[0];
         const example = top ? `\n\nExample: compress({ content: [{ startId: "${top.startRef}", endId: "${top.endRef}", summary: "..." }] })` : "";
         if (emergency) {
@@ -227,7 +233,8 @@ function wireContextTransform(pi: ExtensionAPI, runtime: AcpRuntime): void {
 function wireSystemPrompt(pi: ExtensionAPI, runtime: AcpRuntime): void {
   pi.on("before_agent_start", (event) => {
     const delegate = runtime.adapter.delegate !== false;
-    const prompt = delegate ? `${ACP_SYSTEM_PROMPT}\n${ACP_DELEGATE_PROMPT}` : ACP_SYSTEM_PROMPT;
+    const acp = buildAcpSystemPrompt(runtime.prompts);
+    const prompt = delegate ? `${acp}\n${ACP_DELEGATE_PROMPT}` : acp;
     return { systemPrompt: formatSystemPromptForEvent(event.systemPrompt, prompt) };
   });
 }
@@ -250,8 +257,8 @@ function collectOriginals(entries: Array<{ type: string; id: string; message?: A
   return map;
 }
 
-function nudgeMessage(nudge: NudgeDecision, blocks: CompressionBlock[]): AgentMessage {
-  const rendered = renderNudgeText(nudge);
+function nudgeMessage(nudge: NudgeDecision, blocks: CompressionBlock[], prompts: Prompts): AgentMessage {
+  const rendered = renderNudgeText(nudge, prompts);
   const lines = [rendered.text];
 
   if (blocks.length > 0) {
