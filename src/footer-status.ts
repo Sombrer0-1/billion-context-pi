@@ -3,7 +3,7 @@ import { getDelegateUsage } from "./delegate-tool.js";
 
 const FOOTER_STATUS_KEY = "billion-context-pi";
 let ui: ExtensionContext["ui"] | undefined;
-let lastFooterText = "";
+let lastFooterText: string | undefined = "";
 
 /** Mirrors pi's footer.js formatTokens: lowercase k/M, thresholds <1000/<10000/<1e6/<1e7. */
 export function formatCompactTokens(count: number): string {
@@ -16,6 +16,7 @@ export function formatCompactTokens(count: number): string {
 
 export function initFooterStatus(ctx: ExtensionContext): void {
   ui = ctx.ui;
+  lastFooterText = undefined;
 }
 
 /** Refresh the footer delegate-usage line. Cheap: reads the accumulated total
@@ -28,7 +29,7 @@ export function updateFooterStatus(): void {
     const costStr = usage.cost.total > 0 ? ` ($${usage.cost.total.toFixed(4)})` : "";
     text = `sub-agents \u2191${formatCompactTokens(usage.input)} \u2193${formatCompactTokens(usage.output)}${costStr}`;
   }
-  if (text === lastFooterText) return;
+  if ((text ?? "") === lastFooterText) return;
   lastFooterText = text ?? "";
   try {
     ui.setStatus(FOOTER_STATUS_KEY, text);

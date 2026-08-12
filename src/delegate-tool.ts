@@ -125,6 +125,8 @@ interface DelegateRun {
   usage?: Usage;
   /** True once a wait/cancel tool has returned usage — prevents double-count. */
   usageReported?: boolean;
+  /** True once agent_settled fired; a watchdog kill after this is stuck teardown, not a timeout. */
+  agentSettled?: boolean;
 }
 const runs = new Map<string, DelegateRun>();
 
@@ -641,7 +643,7 @@ async function runDelegate(
       {
         isSettled: () => settled || run.status !== "running",
         onKill: (reason) => {
-          run.timedOut = reason;
+          if (!run.agentSettled) run.timedOut = reason;
           debug.event("delegate-watchdog", { runId, reason });
         },
         onEofGrace: () => {
@@ -675,6 +677,7 @@ async function runDelegate(
           run.usage = accumulateUsage(run.usage, u);
         },
         onSettled: () => {
+          run.agentSettled = true;
           watchdog.settledGrace(SETTLED_GRACE_MS, KILL_GRACE_MS, "agent settled but process did not exit");
         },
       },

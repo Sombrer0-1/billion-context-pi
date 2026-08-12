@@ -33,6 +33,26 @@ The PR was opened against an older master. After `#121/#123/#124/#125` landed,
 it conflicted. Resolved in merge commit `1bf6bb4` (parents `[8fdb60d, 4c058eb]`),
 pushed to the author's fork `Tyan66666:fix/105-delegate-usage-tracking`.
 
+### Post-review fixes (R1 + R2)
+
+A cross-platform/regression review (oracle) found two minor issues, both fixed
+in a follow-up commit on `resolve-pr106`:
+
+- **R1 — footer `setStatus` churned every 500ms tick when there was no usage**
+  (`src/footer-status.ts`). The dedup compared `text` against `lastFooterText`,
+  but `lastFooterText = text ?? ""` normalised `undefined` to `""` *after* the
+  comparison, so the empty state never matched. Fix: compare `(text ?? "")` on
+  both sides, and reset `lastFooterText` to `undefined` in `initFooterStatus`
+  so the first refresh of each session always fires (defensive clear) while
+  subsequent identical ticks dedup. All `footer-status.test.ts` cases still pass.
+- **R2 — a post-`agent_settled` force-kill was mislabeled `(timed out: ...)`**
+  (`src/delegate-tool.ts`). After `agent_settled` the agent flow is complete and
+  the reply is already streamed, so a watchdog kill is stuck teardown, not a
+  timeout. Fix: track `run.agentSettled` (set in the `onSettled` callback); in
+  `onKill`, only set `run.timedOut` when `!run.agentSettled`. The watchdog
+  interface and `delegate-watchdog.ts` are unchanged (localized to
+  `delegate-tool.ts`); `watchdog.test.ts` unaffected.
+
 ### Key Files
 
 - `src/delegate-events.ts` — NEW. `Usage` interface, `handleMessageEnd`,
@@ -82,7 +102,8 @@ npm run build       # success
   - Malformed/missing usage fields — see the cross-platform/regression review.
   - `agent_settled` force-kill could theoretically hit a legitimately slow
     teardown; mitigated by the 10s grace + the fact Pi emits `agent_settled`
-    only after the agent flow is fully done.
+    only after the agent flow is fully done. The misleading `(timed out: ...)`
+    label for such kills is now suppressed via `run.agentSettled` (see R2).
   - Cross-platform: process kill reuses the existing SIGTERM→SIGKILL
     `killByWatchdog` (SIGKILL is reliable on Windows); the new `settledGrace`
     path adds no new signal behavior.
@@ -94,5 +115,5 @@ npm run build       # success
 
 - [ ] Rename the PR branch to a `YYYY-MM-DD_...` name to satisfy `pr-validation`
       (currently overridden at merge).
-- [ ] Remove `PROPOSAL.md` from the repo root — content now lives here as
-      `DESIGN.md` (done in the same commit that created this devlog).
+- [x] Remove `PROPOSAL.md` from the repo root — content now lives here as
+      `DESIGN.md` (done in the devlog-establishment commit).
