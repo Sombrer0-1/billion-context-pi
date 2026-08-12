@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { entriesToCoreMessages, coreOutToAgentMessages, messageIdentity } from "../src/messages.js";
+import { entriesToCoreMessages, coreOutToAgentMessages, matchesStoredText, messageIdentity } from "../src/messages.js";
 import type { CoreMessage } from "acp-kernel";
 import type { SessionEntry, SessionMessageEntry } from "@earendil-works/pi-coding-agent";
 
@@ -352,6 +352,12 @@ test("coreOutToAgentMessages honors kernel-truncated body for string-content too
   assert.ok(msg.content.includes("[truncated for context space]"), "truncated body present");
   assert.ok(!msg.content.includes("Y".repeat(100)), "full original not emitted");
   assert.ok(msg.content.includes("m00004"), "ref tag preserved");
+});
+
+test("truncation matching requires the OMP marker", () => {
+  assert.equal(matchesStoredText("a\nb", "a\nb"), false);
+  assert.equal(matchesStoredText("a\nb", "a\nb\nc"), false);
+  assert.equal(matchesStoredText("a\nb", "a\n\nb"), false);
 });
 
 test("coreOutToAgentMessages returns original unchanged when no ref tag is present", () => {

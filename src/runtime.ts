@@ -7,7 +7,7 @@ import {
   type Config,
 } from "acp-kernel";
 import { resolveConfig, type AdapterConfig } from "./config.js";
-import { entriesToCoreMessages, messageIdentity, messageRef } from "./messages.js";
+import { entriesToCoreMessages, extractText, matchesStoredText, messageIdentity, messageRef } from "./messages.js";
 import { SessionStateStore, type LiveRefOrigin } from "./state.js";
 import { logInfo, logWarn } from "./log.js";
 
@@ -125,10 +125,27 @@ function matchPersistedSuffix(persisted: SessionMessageEntry[], live: AgentMessa
 
 function sameMessage(a: AgentMessage, b: AgentMessage): boolean {
   try {
-    return messageIdentity(a) === messageIdentity(b);
+    if (messageIdentity(a) === messageIdentity(b)) return true;
+    const ra = (a as { role?: string }).role;
+    const rb = (b as { role?: string }).role;
+    if (ra !== rb || ra !== "toolResult") return false;
+    const ca = (a as { content?: unknown }).content;
+    const cb = (b as { content?: unknown }).content;
+    return sameNonTextBlocks(ca, cb) && matchesStoredText(extractText(ca), extractText(cb));
   } catch (e) {
     logWarn("runtime", { event: "message-compare-failed", error: e instanceof Error ? e.message : String(e) });
     return a === b;
+  }
+}
+
+function sameNonTextBlocks(a: unknown, b: unknown): boolean {
+  const nonText = (blocks: unknown[]): unknown[] => blocks.filter((block) => (block as { type?: string }).type !== "text");
+  try {
+    const na = Array.isArray(a) ? nonText(a) : [];
+    const nb = Array.isArray(b) ? nonText(b) : [];
+    return JSON.stringify(na) === JSON.stringify(nb);
+  } catch {
+    return false;
   }
 }
 
