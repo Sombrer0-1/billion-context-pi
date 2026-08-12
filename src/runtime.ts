@@ -7,7 +7,7 @@ import {
   type Config,
 } from "acp-kernel";
 import { resolveConfig, type AdapterConfig } from "./config.js";
-import { entriesToCoreMessages } from "./messages.js";
+import { entriesToCoreMessages, extractText, matchesStoredText } from "./messages.js";
 import { SessionStateStore } from "./state.js";
 import { logInfo, logWarn } from "./log.js";
 
@@ -103,10 +103,23 @@ function sameMessage(a: AgentMessage, b: AgentMessage): boolean {
   const cb = (b as { content?: unknown }).content;
   if (ca === undefined || cb === undefined) return false;
   try {
-    return JSON.stringify(ca) === JSON.stringify(cb);
+    if (JSON.stringify(ca) === JSON.stringify(cb)) return true;
+    if (ra === "toolResult" && sameNonTextBlocks(ca, cb) && matchesStoredText(extractText(ca), extractText(cb))) return true;
+    return false;
   } catch (e) {
     logWarn("runtime", { event: "message-compare-failed", error: e instanceof Error ? e.message : String(e) });
     return a === b;
+  }
+}
+
+function sameNonTextBlocks(a: unknown, b: unknown): boolean {
+  const nonText = (blocks: unknown[]): unknown[] => blocks.filter((block) => (block as { type?: string }).type !== "text");
+  try {
+    const na = Array.isArray(a) ? nonText(a) : [];
+    const nb = Array.isArray(b) ? nonText(b) : [];
+    return JSON.stringify(na) === JSON.stringify(nb);
+  } catch {
+    return false;
   }
 }
 

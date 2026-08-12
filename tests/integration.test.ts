@@ -1,6 +1,10 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { createAcpExtension } from "../src/index.js";
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 // Mock Pi's ExtensionAPI — captures the event handlers the factory registers,
 // so we can invoke them with a fake ExtensionContext and assert the wiring works.
@@ -183,6 +187,102 @@ test("omp live message keeps the same entry id once persisted (stable refs acros
   assert.ok(r2);
   assert.equal(r2.messages.length, 2, "both persisted and live messages must survive");
 });
+
+test("omp matches emergency-truncated tool results before compression", async (t) => {
+  const { api, handlers } = captureApi();
+  createAcpExtension({ modelContextLimit: 200_000 })(api);
+  const dir = await mkdtemp(join(tmpdir(), "pai-acp-omp-truncation-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const stateFile = join(dir, "session.json");
+  const originalText = "This large tool output must retain its persisted identity. ".repeat(130);
+  const truncatedText = `${originalText.slice(0, 2000)}\n\n...[truncated for context space] — original ~1500 tokens]...\n\n${originalText.slice(-2000)}`;
+  const filler = (n: string) => `filler ${n} `.repeat(400);
+  const persisted = [
+    { type: "message", id: "e1", parentId: null, timestamp: "", message: { role: "toolResult", toolName: "read", toolCallId: "call-read", content: [{ type: "text", text: originalText }], timestamp: Date.now() } },
+    ...["two", "three", "four", "five", "six", "seven"].map((n, index) => userMsg(`e${index + 2}`, filler(n))),
+  ];
+  const ctx = { ...fakeCtx(persisted, stateFile), sessionManager: { getBranch: () => persisted, getSessionId: () => "test-session", getSessionFile: () => stateFile } };
+  const liveMessages = [
+    { role: "toolResult", toolName: "read", toolCallId: "call-read", content: [{ type: "text", text: truncatedText }], timestamp: Date.now() },
+    ...["two", "three", "four", "five", "six", "seven"].map((n) => ({ role: "user", content: [{ type: "text", text: filler(n) }], timestamp: Date.now() })),
+  ];
+  const transformed = await handlers.get("context")![0]!({ type: "context", messages: liveMessages }, ctx);
+  const targetRef = transformed.messages[0].content.find((block: { type: string; text: string }) => block.type === "text").text.match(/m\d{5}/)![0];
+  const compressTool = api.tools.find((tool: { name: string }) => tool.name === "compress")!;
+  const result = await compressTool.execute("tc-omp-truncation", { content: [{ startId: targetRef, endId: targetRef, summary: "This large tool result was emergency-truncated in provider context and is now safely compressed from the original entry." }] }, undefined, undefined, ctx);
+  assert.match(result.content[0].text, /1 block/, result.content[0].text);
+});
+
+test("omp does not collapse distinct multimodal user messages with identical text (images survive)", async () => {
+  const { api, handlers } = captureApi();
+  createAcpExtension({ modelContextLimit: 200_000 })(api as unknown as ExtensionAPI);
+
+  const persistedImage = { type: "image", mimeType: "image/png", data: "persisted-image-payload" };
+  const liveImage = { type: "image", mimeType: "image/png", data: "live-image-payload" };
+  const persisted = [
+    {
+      type: "message",
+      id: "e1",
+      parentId: null,
+      timestamp: "",
+      message: { role: "user", content: [{ type: "text", text: "what is this?" }, persistedImage], timestamp: Date.now() },
+    },
+  ];
+  const liveMessages = [{ role: "user", content: [{ type: "text", text: "what is this?" }, liveImage], timestamp: Date.now() }];
+  const ctx = {
+    ...fakeCtx(persisted, "/tmp/nonexistent-pai-acp-omp-images.session.json"),
+    sessionManager: {
+      getBranch: () => persisted,
+      getSessionId: () => "test-session",
+      getSessionFile: () => "/tmp/nonexistent-pai-acp-omp-images.session.json",
+    },
+  };
+
+  const result = await handlers.get("context")![0]!({ type: "context", messages: liveMessages }, ctx);
+  assert.ok(result, "handler must not throw");
+  assert.equal(result.messages.length, 1, "the live multimodal message must survive the transform");
+  const content = result.messages[0].content;
+  const imageBlocks = content.filter((b: { type?: string; data?: string }) => b.type === "image");
+  assert.equal(imageBlocks.length, 1, "exactly one image block must survive");
+  assert.equal(imageBlocks[0]!.data, "live-image-payload", "the LIVE image payload must survive, not the persisted one");
+  assert.ok(!content.some((b: { type?: string; data?: string }) => b.data === "persisted-image-payload"), "persisted image must not replace the live one");
+});
+
+test("omp does not collapse distinct multimodal tool results with identical text (images survive)", async () => {
+  const { api, handlers } = captureApi();
+  createAcpExtension({ modelContextLimit: 200_000 })(api as unknown as ExtensionAPI);
+
+  const persistedImage = { type: "image", mimeType: "image/png", data: "persisted-image-payload" };
+  const liveImage = { type: "image", mimeType: "image/png", data: "live-image-payload" };
+  const persisted = [
+    {
+      type: "message",
+      id: "e1",
+      parentId: null,
+      timestamp: "",
+      message: { role: "toolResult", toolName: "read", toolCallId: "call-read", content: [{ type: "text", text: "same tool output" }, persistedImage], timestamp: Date.now() },
+    },
+  ];
+  const liveMessages = [{ role: "toolResult", toolName: "read", toolCallId: "call-read", content: [{ type: "text", text: "same tool output" }, liveImage], timestamp: Date.now() }];
+  const ctx = {
+    ...fakeCtx(persisted, "/tmp/nonexistent-pai-acp-omp-toolresult-images.session.json"),
+    sessionManager: {
+      getBranch: () => persisted,
+      getSessionId: () => "test-session",
+      getSessionFile: () => "/tmp/nonexistent-pai-acp-omp-toolresult-images.session.json",
+    },
+  };
+
+  const result = await handlers.get("context")![0]!({ type: "context", messages: liveMessages }, ctx);
+  assert.ok(result, "handler must not throw");
+  assert.equal(result.messages.length, 1, "the live multimodal tool result must survive the transform");
+  const content = result.messages[0].content;
+  const imageBlocks = content.filter((b: { type?: string; data?: string }) => b.type === "image");
+  assert.equal(imageBlocks.length, 1, "exactly one image block must survive");
+  assert.equal(imageBlocks[0]!.data, "live-image-payload", "the LIVE image payload must survive, not the persisted one");
+  assert.ok(!content.some((b: { type?: string; data?: string }) => b.data === "persisted-image-payload"), "persisted image must not replace the live one");
+});
+
 test("system prompt sources compression rules from acp-kernel (no hardcoded drift, no markers)", () => {
   const { api, handlers } = captureApi();
   createAcpExtension()(api as any);
