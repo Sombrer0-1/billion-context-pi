@@ -132,6 +132,21 @@ function sameMessage(a: AgentMessage, b: AgentMessage): boolean {
   }
 }
 
+function pruneOrphanRefs(state: CompressionState, messages: ReturnType<typeof entriesToCoreMessages>): void {
+  const retainedRawIds = new Set(messages.map((message) => message.id));
+  for (const block of state.blocks) {
+    for (const rawId of [...block.directMessageIds, ...block.effectiveMessageIds]) retainedRawIds.add(rawId);
+  }
+  for (const [rawId, ref] of Object.entries(state.messageRefs.byRaw)) {
+    if (retainedRawIds.has(rawId)) continue;
+    delete state.messageRefs.byRaw[rawId];
+    if (state.messageRefs.byRef[ref] === rawId) delete state.messageRefs.byRef[ref];
+  }
+  for (const [ref, rawId] of Object.entries(state.messageRefs.byRef)) {
+    if (!retainedRawIds.has(rawId)) delete state.messageRefs.byRef[ref];
+  }
+}
+
 export function createRuntime(adapter: AdapterConfig): AcpRuntime {
   const core = createCore({ countTokens: defaultCountTokens });
   const store = new SessionStateStore();
@@ -165,13 +180,24 @@ export function createRuntime(adapter: AdapterConfig): AcpRuntime {
     const sessionId = sm.getSessionId();
     const state = await store.load(sessionFile, sessionId);
     const entries = readContextEntries(sm);
+    // omp fires the context event BEFORE the current user message is persisted
+    // to the session branch (its agent-loop emits message_end only after
+    // prepareProviderCall → transformContext), so getBranch() lags one message
+    // behind and the current prompt would be dropped from the rebuilt context.
+    // pi appends user messages to the session before the LLM call, so its
+    // buildContextEntries() is always current. Merge event.messages (the exact
+    // messages about to be sent, including the not-yet-persisted tail) with the
+    // persisted branch records on the omp path only.
     if (!isPiHost(sm) && liveMessages && liveMessages.length > 0) {
       const origins = store.getLiveRefOrigins(sessionFile, sessionId);
       const merged = mergeLiveEntries(entries, liveMessages, state, origins);
       store.setLiveRefOrigins(sessionFile, sessionId, origins);
-      return { state, coreMessages: entriesToCoreMessages(merged), entries: merged };
+      const coreMessages = entriesToCoreMessages(merged);
+      return { state, coreMessages, entries: merged };
     }
-    return { state, coreMessages: entriesToCoreMessages(entries), entries };
+    const coreMessages = entriesToCoreMessages(entries);
+    if (liveMessages === undefined) pruneOrphanRefs(state, coreMessages);
+    return { state, coreMessages, entries };
   }
 
   async function save(state: CompressionState, ctx: ExtensionContext) {
