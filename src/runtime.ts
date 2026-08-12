@@ -123,6 +123,21 @@ function sameNonTextBlocks(a: unknown, b: unknown): boolean {
   }
 }
 
+function pruneOrphanRefs(state: CompressionState, messages: ReturnType<typeof entriesToCoreMessages>): void {
+  const retainedRawIds = new Set(messages.map((message) => message.id));
+  for (const block of state.blocks) {
+    for (const rawId of [...block.directMessageIds, ...block.effectiveMessageIds]) retainedRawIds.add(rawId);
+  }
+  for (const [rawId, ref] of Object.entries(state.messageRefs.byRaw)) {
+    if (retainedRawIds.has(rawId)) continue;
+    delete state.messageRefs.byRaw[rawId];
+    if (state.messageRefs.byRef[ref] === rawId) delete state.messageRefs.byRef[ref];
+  }
+  for (const [ref, rawId] of Object.entries(state.messageRefs.byRef)) {
+    if (!retainedRawIds.has(rawId)) delete state.messageRefs.byRef[ref];
+  }
+}
+
 export function createRuntime(adapter: AdapterConfig): AcpRuntime {
   const core = createCore({ countTokens: defaultCountTokens });
   const store = new SessionStateStore();
@@ -170,7 +185,9 @@ export function createRuntime(adapter: AdapterConfig): AcpRuntime {
     // messages about to be sent, including the not-yet-persisted tail) with the
     // persisted branch records on the omp path only.
     const merged = isPiHost(sm) || !liveMessages || liveMessages.length === 0 ? entries : mergeLiveEntries(entries, liveMessages);
-    return { state, coreMessages: entriesToCoreMessages(merged), entries: merged };
+    const coreMessages = entriesToCoreMessages(merged);
+    if (liveMessages === undefined) pruneOrphanRefs(state, coreMessages);
+    return { state, coreMessages, entries: merged };
   }
 
   async function save(state: CompressionState, ctx: ExtensionContext) {

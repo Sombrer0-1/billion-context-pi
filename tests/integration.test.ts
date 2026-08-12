@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createAcpExtension } from "../src/index.js";
@@ -283,6 +283,44 @@ test("omp does not collapse distinct multimodal tool results with identical text
   assert.ok(!content.some((b: { type?: string; data?: string }) => b.data === "persisted-image-payload"), "persisted image must not replace the live one");
 });
 
+test("acp_status refs remain usable by the next compress call", async () => {
+  const { api } = captureApi();
+  createAcpExtension({ modelContextLimit: 200_000 })(api);
+  const stateFile = "/tmp/nonexistent-pai-acp-status-compress.session.json";
+  await rm(`${stateFile}.acp.json`, { force: true });
+  const originalText = "This range is reported by acp_status and must remain addressable by compress. ".repeat(130);
+  const persisted = [userMsg("e1", originalText), ...["two", "three", "four", "five", "six", "seven"].map((n, index) => userMsg(`e${index + 2}`, `filler ${n} `.repeat(400)))];
+  const ctx = { ...fakeCtx(persisted, stateFile), sessionManager: { getBranch: () => persisted, getSessionId: () => "test-session", getSessionFile: () => stateFile } };
+  const statusTool = api.tools.find((tool: { name: string }) => tool.name === "acp_status")!;
+  const status = await statusTool.execute("tc-status", {}, undefined, undefined, ctx);
+  const targetRef = status.content[0].text.match(/m\d{5}/)![0];
+  const compressTool = api.tools.find((tool: { name: string }) => tool.name === "compress")!;
+  const result = await compressTool.execute("tc-status-compress", { content: [{ startId: targetRef, endId: targetRef, summary: "This range was selected by acp_status and is now safely compressed from the original entry." }] }, undefined, undefined, ctx);
+  assert.match(result.content[0].text, /1 block/, result.content[0].text);
+});
+
+test("omp rebuilds refs after stale live state before status compression", async () => {
+  const { api, handlers } = captureApi();
+  createAcpExtension({ modelContextLimit: 200_000 })(api);
+  const stateFile = "/tmp/nonexistent-pai-acp-stale-live.session.json";
+  await rm(`${stateFile}.acp.json`, { force: true });
+  const longText = "This stale live state must be rebuilt against the current persisted branch. ".repeat(130);
+  const filler = (n: string) => `filler ${n} `.repeat(400);
+  const texts = [longText, filler("two"), filler("three"), filler("four"), filler("five"), filler("six"), filler("seven")];
+  let persisted: ReturnType<typeof userMsg>[] = [];
+  const ctx = { ...fakeCtx(persisted, stateFile), sessionManager: { getBranch: () => persisted, getSessionId: () => "test-session", getSessionFile: () => stateFile } };
+  const liveMessages = texts.map((text) => ({ role: "user", content: [{ type: "text", text }], timestamp: Date.now() }));
+  await handlers.get("context")![0]!({ type: "context", messages: liveMessages }, ctx);
+  persisted = texts.map((text, index) => userMsg(`e${index + 1}`, text));
+  const statusTool = api.tools.find((tool: { name: string }) => tool.name === "acp_status")!;
+  const status = await statusTool.execute("tc-stale-live-status", {}, undefined, undefined, ctx);
+  const targetRef = status.content[0].text.match(/m\d{5}/)![0];
+  assert.equal(targetRef, "m00001", status.content[0].text);
+  const compressTool = api.tools.find((tool: { name: string }) => tool.name === "compress")!;
+  const result = await compressTool.execute("tc-stale-live-compress", { content: [{ startId: targetRef, endId: targetRef, summary: "This stale live range was rebuilt against stable persisted entries and is now safely compressed." }] }, undefined, undefined, ctx);
+  assert.match(result.content[0].text, /1 block/, result.content[0].text);
+});
+
 test("system prompt sources compression rules from acp-kernel (no hardcoded drift, no markers)", () => {
   const { api, handlers } = captureApi();
   createAcpExtension()(api as any);
@@ -321,6 +359,18 @@ test("context handler persists state so a second call is idempotent on the same 
   const tag1 = ((first.messages[0] as any).content as any[]).find((b: any) => b.type === "text" && b.text.startsWith("[m"));
   const tag2 = ((second.messages[0] as any).content as any[]).find((b: any) => b.type === "text" && b.text.startsWith("[m"));
   assert.equal(tag1?.text, tag2?.text, "refs stable across calls (loaded from persisted state)");
+});
+
+test("empty live context preserves refs created for an unpersisted message", async () => {
+  const { api, handlers } = captureApi();
+  createAcpExtension({ modelContextLimit: 200_000 })(api);
+  const stateFile = "/tmp/nonexistent-pai-acp-empty-live.session.json";
+  await rm(`${stateFile}.acp.json`, { force: true });
+  const ctx = fakeCtx([], stateFile);
+  await handlers.get("context")![0]!({ type: "context", messages: [{ role: "user", content: "live-only" }] }, ctx);
+  await handlers.get("context")![0]!({ type: "context", messages: [] }, ctx);
+  const state = JSON.parse(await readFile(`${stateFile}.acp.json`, "utf8"));
+  assert.equal(state.messageRefs.byRaw["live-0"], "m00001");
 });
 
 test("delegate:false omits the ACP_DELEGATE NOTIFICATIONS section from the system prompt", () => {
