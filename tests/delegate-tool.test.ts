@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { buildChildArgs, injectedWaitMessage, buildWaitResult, buildCancelResult, getDelegateUsage, resetDelegateUsage, injectResult } from "../src/delegate-tool.js";
+import { buildChildArgs, delegateSpawnOptions, injectedWaitMessage, buildWaitResult, buildCancelResult, getDelegateUsage, resetDelegateUsage, injectResult } from "../src/delegate-tool.js";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 
 /** Minimal ctx mock - buildChildArgs reads ctx.model and sessionManager. */
@@ -14,6 +14,13 @@ function mockCtx(host: "pi" | "omp" = "pi"): ExtensionContext {
 
 const RESTRICTED_ROLES = ["reviewer", "researcher", "planner", "oracle"] as const;
 const ACP_TOOLS = ["compress", "decompress", "search_context", "acp_status"];
+
+test("delegate spawn bypasses the shell for Windows executable paths", () => {
+  const options = delegateSpawnOptions("C:\\workspace", { TEST: "1" });
+  assert.equal(options.shell, false);
+  assert.equal(options.cwd, "C:\\workspace");
+  assert.deepEqual(options.stdio, ["pipe", "pipe", "pipe"]);
+});
 
 /** Parse the --tools value from cliArgs, or null if absent. */
 function getToolsValue(cliArgs: string[]): string | null {

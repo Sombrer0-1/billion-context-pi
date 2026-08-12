@@ -1,6 +1,7 @@
 import {
   spawn,
   type ChildProcess,
+  type SpawnOptions,
 } from "node:child_process";
 import { createWriteStream, type WriteStream } from "node:fs";
 import { mkdir, mkdtemp, writeFile, rm, appendFile } from "node:fs/promises";
@@ -28,6 +29,15 @@ const ASYNC_TIMEOUT_MS = 30 * 60_000;
 const KILL_GRACE_MS = 10_000;
 const RESULT_SUMMARY_CHARS = 500;
 const OUT_DIR = join(tmpdir(), "acp-delegate");
+
+export function delegateSpawnOptions(cwd: string, env: NodeJS.ProcessEnv): SpawnOptions {
+  return {
+    cwd,
+    env,
+    stdio: ["pipe", "pipe", "pipe"],
+    shell: false,
+  };
+}
 
 /** ACP context-management tools that every restricted delegate must retain
  *  so it can manage its own context under billion-context-pi. */
@@ -143,6 +153,104 @@ export function runningRunsSnapshot(): { runId: string; agent: string; task: str
     if (r.status === "running") out.push({ runId: r.runId, agent: r.agent, task: r.task, startedAt: r.startedAt });
   }
   return out;
+}
+
+/** Minimal writable surface accepted by makeEventApplier — real WriteStreams
+ *  in production, in-memory collectors in tests. */
+export interface EventApplierWriters {
+  reply: { write(chunk: string): void };
+  activity: { write(chunk: string): void } | null;
+}
+
+export interface EventApplier {
+  handleEventLine(line: string): void;
+  getReplyText(): string;
+  /** omp fallback: `-p` prints the plain reply as raw stdout; append it
+   *  straight through (no event parsing). */
+  appendRaw(text: string): void;
+}
+
+/** Applies parsed delegate JSON-event lines to the live reply/activity files.
+ *  Extracted from the spawn closure so the write logic is unit-testable.
+ *
+ *  reply-delta (text_delta) is streamed to the reply file as it arrives;
+ *  reply-complete (text_end) carries the authoritative full content of the
+ *  text block — any portion not already written is appended (tracked via
+ *  msgWritten) so a final answer that arrives without preceding deltas is
+ *  never lost from the file. */
+export function makeEventApplier(
+  opts: { showThinking: boolean; onUsage?: (usage: Usage) => void; onSettled?: () => void },
+  writers: EventApplierWriters,
+): EventApplier {
+  let replyText = "";
+  let msgWritten = 0;
+  const lastToolText = new Map<string, string>();
+  const thinking = new ThinkingCollector(opts.showThinking);
+  const flushThinking = (): void => {
+    const line = thinking.flush();
+    if (line) writers.activity?.write(line);
+  };
+  const handleEventLine = (line: string): void => {
+    const ev = parseEventLine(line);
+    if (!ev) return;
+    if (ev.kind === "usage-update") {
+      opts.onUsage?.(ev.usage);
+      return;
+    }
+    if (ev.kind === "thinking-delta") {
+      thinking.push(ev.delta);
+      return;
+    }
+    if (ev.kind === "thinking-end") {
+      flushThinking();
+      return;
+    }
+    if (ev.kind === "agent-settled") {
+      flushThinking();
+      opts.onSettled?.();
+      return;
+    }
+    if (ev.kind === "reply-delta") {
+      flushThinking();
+      replyText += ev.delta;
+      msgWritten += ev.delta.length;
+      writers.reply.write(ev.delta);
+      return;
+    }
+    if (ev.kind === "reply-complete") {
+      flushThinking();
+      const tail = ev.content.slice(msgWritten);
+      if (tail) {
+        writers.reply.write(tail);
+        debug.event("reply-complete-tail", { tailLen: tail.length, contentLen: ev.content.length });
+      }
+      if (ev.content.length < msgWritten) {
+        logWarn("delegate", { event: "reply-content-shorter-than-delta", contentLen: ev.content.length, written: msgWritten });
+      }
+      msgWritten = 0;
+      replyText = ev.content;
+      return;
+    }
+    if (ev.kind === "tool-update") {
+      flushThinking();
+      const prev = lastToolText.get(ev.toolCallId) ?? "";
+      const add = newPortion(ev.text, prev);
+      lastToolText.set(ev.toolCallId, ev.text);
+      if (add) writers.activity?.write(add.endsWith("\n") ? add : `${add}\n`);
+      return;
+    }
+    flushThinking();
+    const lines = activityLines(ev, { showThinking: opts.showThinking });
+    if (lines.length) writers.activity?.write(lines.join(""));
+  };
+  return {
+    handleEventLine,
+    getReplyText: () => replyText,
+    appendRaw(text: string) {
+      replyText += text;
+      writers.reply.write(text);
+    },
+  };
 }
 
 const WAIT_TIMEOUT_MS_DEFAULT = 10_000;
@@ -509,12 +617,11 @@ async function runDelegate(
   debug.event("delegate-spawn", { agent: args.agent, runId, cwd, async: isAsync, useJsonStream, cliArgs });
   logInfo("delegate", { event: "spawn", agent: args.agent, runId, cwd, async: isAsync, useJsonStream, mode: ctx.mode, parentDepth });
 
-  const child = spawn(process.execPath, [process.argv[1]!, ...cliArgs], {
-    cwd,
-    env: childEnv,
-    stdio: ["pipe", "pipe", "pipe"],
-    shell: process.platform === "win32",
-  }) as ChildProcess;
+  const child = spawn(
+    process.execPath,
+    [process.argv[1]!, ...cliArgs],
+    delegateSpawnOptions(cwd, childEnv),
+  ) as ChildProcess;
   child.stdin?.once("error", (e: Error) => {
     debug.event("delegate-stdin-error", { runId: "pre-spawn", error: String(e) });
     logError("delegate", { event: "stdin-error", runId, error: String(e) });
@@ -560,59 +667,19 @@ async function runDelegate(
         if (!s || s.destroyed || s.closed) return resolve();
         s.end(() => resolve());
       });
-    let replyText = "";
     let stdoutBuf = "";
-    // partialResult is an accumulated snapshot, so each update carries
-    // everything so far; track the last written text per tool call to append
-    // only the new portion.
-    const lastToolText = new Map<string, string>();
-    const thinking = new ThinkingCollector(args.showThinking === true);
-    const flushThinking = (): void => {
-      const line = thinking.flush();
-      if (line) activityStream?.write(line);
-    };
-    const handleEventLine = (line: string): void => {
-      const ev = parseEventLine(line);
-      if (!ev) return;
-      if (ev.kind === "usage-update") {
-        run.usage = accumulateUsage(run.usage, ev.usage);
-      }
-      if (ev.kind === "thinking-delta") {
-        thinking.push(ev.delta);
-        return;
-      }
-      if (ev.kind === "thinking-end") {
-        flushThinking();
-        return;
-      }
-      if (ev.kind === "agent-settled") {
-        flushThinking();
-        watchdog.settledGrace(SETTLED_GRACE_MS, KILL_GRACE_MS, "agent settled but process did not exit");
-        return;
-      }
-      if (ev.kind === "reply-delta") {
-        flushThinking();
-        replyText += ev.delta;
-        replyStream.write(ev.delta);
-        return;
-      }
-      if (ev.kind === "reply-complete") {
-        flushThinking();
-        replyText = ev.content;
-        return;
-      }
-      if (ev.kind === "tool-update") {
-        flushThinking();
-        const prev = lastToolText.get(ev.toolCallId) ?? "";
-        const add = newPortion(ev.text, prev);
-        lastToolText.set(ev.toolCallId, ev.text);
-        if (add) activityStream?.write(add.endsWith("\n") ? add : `${add}\n`);
-        return;
-      }
-      flushThinking();
-      const lines = activityLines(ev, { showThinking: args.showThinking === true });
-      if (lines.length) activityStream?.write(lines.join(""));
-    };
+    const applier = makeEventApplier(
+      {
+        showThinking: args.showThinking === true,
+        onUsage: (u) => {
+          run.usage = accumulateUsage(run.usage, u);
+        },
+        onSettled: () => {
+          watchdog.settledGrace(SETTLED_GRACE_MS, KILL_GRACE_MS, "agent settled but process did not exit");
+        },
+      },
+      { reply: replyStream, activity: activityStream },
+    );
     child.stdout?.on("data", (c: Buffer) => {
       watchdog.poke();
       if (useJsonStream) {
@@ -621,15 +688,14 @@ async function runDelegate(
         while ((nl = stdoutBuf.indexOf("\n")) >= 0) {
           const line = stdoutBuf.slice(0, nl);
           stdoutBuf = stdoutBuf.slice(nl + 1);
-          handleEventLine(line);
+          applier.handleEventLine(line);
         }
       } else {
         // omp fallback: `-p` prints the plain reply, so stdout IS the reply —
         // stream it straight through (no line buffering, so a trailing chunk
         // without a newline is kept too).
         const text = c.toString("utf8");
-        replyText += text;
-        replyStream.write(text);
+        applier.appendRaw(text);
       }
     });
     child.stderr?.on("data", (c: Buffer) => {
@@ -655,7 +721,7 @@ async function runDelegate(
         void cleanupTmp(tmpDir);
         await Promise.all([endStream(replyStream), endStream(activityStream)]);
         run.exitCode = code;
-        const output = replyText.trim();
+        const output = applier.getReplyText().trim();
         const body = code === 0 ? (output || "(no output)") : (stderrText.trim() || output || "(no output)");
         // N2: cancelled runs never persist a result — wake a parked waiter (if any)
         // and stop. status stays "cancelled" (set by cancel), so wait cannot
