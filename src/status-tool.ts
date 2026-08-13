@@ -5,6 +5,7 @@ import { buildStatusReport, defaultCountTokens, formatRanges } from "acp-kernel"
 import { estimateTokens, collectCoveredMessageIds } from "./tokens.js";
 import { logThrow } from "./log.js";
 import { getDelegateUsage } from "./delegate-tool.js";
+import { resolveDelegate } from "./config.js";
 
 const StatusParams = Type.Object({
   scope: Type.Optional(Type.Union([Type.Literal("compressed"), Type.Literal("uncompressed")], { description: '"compressed" = drill into blocks; "uncompressed" = show visible messages/ranges. Default: overview.' })),
@@ -100,7 +101,7 @@ async function handleStatus(args: StatusArgs, runtime: AcpRuntime, ctx: Extensio
     const costStr = cost > 0 ? ` ($${cost.toFixed(4)})` : "";
     extra.push("── Session delegate usage (excluded from main totals) ──");
     extra.push(`Tokens: ${delegateUsage.input.toLocaleString()} in, ${delegateUsage.output.toLocaleString()} out (${delegateUsage.totalTokens.toLocaleString()} total)${costStr}`);
-  } else if (runtime.adapter.displayUsage === "merged") {
+  } else if (resolveDelegate(runtime.adapter).displayUsage === "merged") {
     extra.push("");
     extra.push("merged mode: delegate usage is included in main session totals.");
   } else {

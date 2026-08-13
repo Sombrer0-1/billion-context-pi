@@ -148,7 +148,10 @@ Create `~/.pi/acp.json` (global) and/or `<project>/.pi/acp.json` (project-local,
   "modelContextLimit": 200000,
   "delegate": true,
   "toolBashDefaultTimeout": 60,
-  "toolOutputMaxBytes": 200000
+  "toolOutputMaxBytes": 200000,
+  "maxContextLimit": "75%",
+  "emergencyThresholdPercent": "95%",
+  "nudgeGrowthTokens": 50000
 }
 ```
 
@@ -160,8 +163,11 @@ Create `~/.pi/acp.json` (global) and/or `<project>/.pi/acp.json` (project-local,
 | `delegate` | `true` | Enable the `acp_delegate` tools (delegate/wait/cancel) and their system-prompt section. Set `false` to skip registering them (e.g. you use a different sub-agent extension, or run headless where async injection adds no value). |
 | `toolBashDefaultTimeout` | `60` | Seconds injected into the `bash` tool when the model omits `timeout`. Pi has **no** default of its own, so without this a forgotten timeout can hang for thousands of seconds. On timeout the model is guided to re-run with a larger `timeout`. `0` restores Pi's unbounded behavior. |
 | `toolOutputMaxBytes` | `200000` | Hard byte cap on tool result text (~5000 lines at ~40 B/line; applied via the `tool_result` hook). Stops runaway output that Pi's own 50KB/2000-line cap can't catch (e.g. tools Pi doesn't cap). When it fires the model is told how to see the full output — for `bash` the full output is in its temp file (`BashToolDetails.fullOutputPath`); set lower (e.g. `8192`) for a tighter context budget, or `0` to disable. |
+| `maxContextLimit` | `"75%"` | Context usage threshold that triggers **forced compression** nudges (bypasses growth-gate + cadence). Accepts a ratio (`0.75`) or percent string (`"75%"`). Lower = compress earlier / more aggressively. Maps to kernel `nudge.maxContextLimitPct`. |
+| `emergencyThresholdPercent` | `"95%"` | Context usage threshold that triggers **emergency truncation** of large tool outputs to keep the session alive. Accepts a ratio (`0.95`) or percent string (`"95%"`). Must be ≥ `maxContextLimit`. Maps to kernel `nudge.emergencyThresholdPct` + `truncate.threshold`. |
+| `nudgeGrowthTokens` | `50000` | Token growth step for soft compression nudges. A nudge fires roughly every time this many tokens become compressible. Lower = compress more often; higher = compress less often. Maps to kernel `nudge.growthFloor` + `nudge.growthCap`. |
 
-> **Only these six keys are read from `acp.json`.** Other tuning knobs (`preserveRecentMessages`, `protectedTools`, nudge thresholds) are code-level and not user-overridable.
+> **Only these nine keys are read from `acp.json`.** Other tuning knobs (`preserveRecentMessages`, `protectedTools`) are code-level and not user-overridable. The three nudge thresholds (`maxContextLimit`, `emergencyThresholdPercent`, `nudgeGrowthTokens`) form a three-tier escalation: growth-driven soft nudges → forced nudges at `maxContextLimit` → emergency truncation at `emergencyThresholdPercent`.
 
 ### Environment variables
 

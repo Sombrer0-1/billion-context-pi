@@ -6,7 +6,7 @@ import type {
 } from "@earendil-works/pi-coding-agent";
 import type { CoreMessage, NudgeDecision, CompressionBlock } from "acp-kernel";
 import { renderNudgeText } from "acp-kernel";
-import type { AdapterConfig } from "./config.js";
+import { type AdapterConfig, resolveDelegate } from "./config.js";
 import { createRuntime, type AcpRuntime } from "./runtime.js";
 import { makeCompressTool } from "./compress-tool.js";
 import { makeDecompressTool } from "./decompress-tool.js";
@@ -70,12 +70,12 @@ function wireSessionLifecycle(pi: ExtensionAPI, runtime: AcpRuntime): void {
     try {
       const user = await loadUserConfig(ctx.cwd);
       runtime.setAdapter(applyUserConfig(runtime.adapter, user));
-      setDelegateDisplayUsage(runtime.adapter.displayUsage ?? "separate");
+      setDelegateDisplayUsage(resolveDelegate(runtime.adapter).displayUsage);
       if (runtime.adapter.debug !== undefined) setDebugEnabled(runtime.adapter.debug);
     } catch (e) {
       logThrow("config", e, { sid, phase: "session_start" });
     }
-    if (runtime.adapter.delegate !== false) {
+    if (resolveDelegate(runtime.adapter).enabled) {
       pi.registerTool(makeDelegateTool(pi));
       pi.registerTool(makeDelegateWaitTool(pi));
       pi.registerTool(makeDelegateCancelTool(pi));
