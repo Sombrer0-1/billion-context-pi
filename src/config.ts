@@ -1,4 +1,4 @@
-import { defaultConfig, type Config } from "acp-kernel";
+import { defaultConfig, type Config, type Prompts } from "acp-kernel";
 
 /** Delegate sub-agent configuration. */
 export interface DelegateConfig {
@@ -75,6 +75,15 @@ export interface AdapterConfig {
   /** Legacy flat alias for `delegate.displayUsage`. Kept for backward
    *  compatibility with existing acp.json files. Prefer `delegate.displayUsage`. */
   displayUsage?: "merged" | "separate";
+  /** Override acp-kernel's load-bearing compression prompt rules (the 4
+   *  Prompts fields). Each set field replaces the kernel default verbatim.
+   *  Requires acknowledgePromptsRisk: true — without it, overrides are dropped
+   *  (defaults used) and a warning is logged. Set via ~/.pi/acp.json. */
+  prompts?: Partial<Prompts>;
+  /** Must be true for `prompts` overrides to take effect. Acknowledges that
+   *  replacing the kernel's tuned compression rules may reduce summary quality
+   *  (lost paths/signatures/decisions → worse retrieval). */
+  acknowledgePromptsRisk?: boolean;
   coreOverrides?: Partial<Config>;
 }
 

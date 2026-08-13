@@ -56,6 +56,20 @@ A minimal config enabling only debug logging:
 }
 ```
 
+An advanced config overriding the kernel's compression prompt rules (requires the risk acknowledgement). Set only the fields you want to change; the rest inherit the kernel defaults:
+
+```json
+{
+  "prompts": {
+    "compressPhilosophy": "My compression philosophy...",
+    "howToCompressRules": "My tier-1 rules...",
+    "tier2DistillRules": "My tier-2 distillation rules...",
+    "tier3CondenseRules": "My tier-3 condensation rules..."
+  },
+  "acknowledgePromptsRisk": true
+}
+```
+
 ---
 
 ## Parameter Reference
@@ -94,6 +108,13 @@ All keys below are currently **ACTIVE**.
 | `compress.maxContextLimit` | number \| string | `"75%"` | 🟢 ACTIVE | Context threshold that triggers forced compression nudges. |
 | `compress.emergencyThresholdPercent` | number \| string | `"95%"` | 🟢 ACTIVE | Context threshold that triggers emergency truncation. |
 | `compress.nudgeGrowthTokens` | number | `50000` | 🟢 ACTIVE | Token growth step for soft compression nudges. |
+
+**Prompts keys**
+
+| Key | Type | Default | Status | Description |
+|-----|------|---------|--------|-------------|
+| `prompts` | object | *(kernel defaults)* | 🟢 ACTIVE | Override acp-kernel's 4 load-bearing compression prompt rules. Each set field replaces the default verbatim. |
+| `acknowledgePromptsRisk` | boolean | `false` | 🟢 ACTIVE | Must be `true` for `prompts` overrides to take effect; otherwise overrides are dropped and defaults are used. |
 
 **Environment variables**
 
@@ -201,6 +222,47 @@ The flow is:
 - **Default:** `50000`
 - **Status:** 🟢 ACTIVE
 - **Description:** The token-growth threshold that controls the cadence of **soft** compression nudges. A soft nudge fires roughly every time this many tokens of new compressible content accumulate. A lower value means the model is nudged to compress more often; a higher value means less frequent nudges. This only governs *growth-driven* nudges — once usage crosses `compress.maxContextLimit`, forced nudges take over regardless of this setting. Maps to the kernel settings `nudge.growthFloor` and `nudge.growthCap`.
+
+---
+
+## Prompts Customization
+
+The `prompts` object overrides acp-kernel's **load-bearing** compression prompt rules — the verbatim instructions the model receives about *how* to write summaries (keep full file paths, function signatures, decisions and rationale; drop verbose logs, etc.). These four fields are embedded into the system prompt and the compression nudge text:
+
+| Field | What it governs |
+|-------|-----------------|
+| `compressPhilosophy` | The two failure modes to avoid (over-/under-compression) and the single test for when to compress. |
+| `howToCompressRules` | Tier-1 rules: what to KEEP verbatim vs DROP, and the summary priority order. |
+| `tier2DistillRules` | Tier-2 distillation rules (decisions/outcomes only). |
+| `tier3CondenseRules` | Tier-3 ultra-condensation rules (bare facts). |
+
+> ⚠️ **Quality risk.** These rules are tuned for retrieval quality. Replacing them with looser text can silently degrade summaries — lost paths, signatures, and decisions lead to worse reconstruction later. The `acknowledgePromptsRisk` gate exists to make this an explicit, deliberate choice.
+
+### `prompts`
+
+- **Type:** `object` (partial — omit fields to keep their defaults)
+- **Default:** *(kernel defaults)* — the verbatim rules shipped with acp-kernel
+- **Status:** 🟢 ACTIVE
+- **Description:** Override one or more of the four compression prompt fields. Each field you set replaces the kernel default **verbatim**; fields you omit are inherited unchanged. Non-string values are silently dropped (only deliberate string overrides apply). Requires `acknowledgePromptsRisk: true` — without it, every override is dropped and the defaults are used, with a warning logged. Example:
+
+  ```json
+  {
+    "prompts": {
+      "compressPhilosophy": "Compress aggressively; prefer signal over completeness.",
+      "howToCompressRules": "Keep file paths + signatures verbatim. Drop verbose logs.",
+      "tier2DistillRules": "Decisions and outcomes only; drop process and paths.",
+      "tier3CondenseRules": "One line per block: bare facts only."
+    },
+    "acknowledgePromptsRisk": true
+  }
+  ```
+
+### `acknowledgePromptsRisk`
+
+- **Type:** `boolean`
+- **Default:** `false`
+- **Status:** 🟢 ACTIVE
+- **Description:** The safety gate for `prompts` overrides. Set to `true` to acknowledge that replacing the kernel's tuned compression rules may reduce summary quality, and to make your `prompts` overrides take effect. When `false` (or omitted), all `prompts` overrides are ignored and the kernel defaults are used. If `resolvePrompts` rejects your override (for example a malformed value that still passes the type check), the extension falls back to the defaults and logs a `prompts-resolve-failed` warning rather than failing to start.
 
 ---
 
