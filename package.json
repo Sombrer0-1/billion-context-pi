@@ -38,7 +38,8 @@
 	"scripts": {
 		"test": "node --import tsx --test tests/*.test.ts",
 		"typecheck": "tsc --noEmit",
-		"build": "tsup && tsc --emitDeclarationOnly"
+		"build": "tsup && tsc --emitDeclarationOnly",
+		"e2e": "node scripts/e2e/run-e2e.mjs"
 	},
 	"keywords": [
 		"pi",
