@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { rm, readFile, mkdtemp } from "node:fs/promises";
+import { rm, readFile, mkdtemp, symlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createAcpExtension } from "../src/index.js";
@@ -130,6 +130,21 @@ test("decompress toFile rejects paths outside allowed roots", async () => {
   const res = await decompressTool.execute("tc5", { blockId: "b1", toFile: "/etc/passwd" }, undefined, undefined, ctx);
   const text = (res.content[0] as any).text as string;
   assert.match(text, /must be under/i, "rejects arbitrary filesystem path");
+});
+
+test("decompress toFile rejects paths that escape an allowed root via a symlink", async () => {
+  const { decompressTool, ctx } = await setupWithCompressedBlock();
+  const jail = await mkdtemp(join(tmpdir(), "pai-acp-jail-"));
+  // A symlink inside the (allowed) jail that points OUTSIDE all allowed roots.
+  // /etc exists on both Linux and macOS, so realpath can follow the link.
+  // The literal path looks contained (jail/evil-link/x.txt under tmpdir), but
+  // resolving the symlink reveals it lands in /etc — must be rejected.
+  const link = join(jail, "evil-link");
+  await symlink("/etc", link);
+  const target = join(link, "passwd.txt");
+  const res = await decompressTool.execute("tc-sym", { blockId: "b1", toFile: target }, undefined, undefined, ctx);
+  const text = (res.content[0] as any).text as string;
+  assert.match(text, /must be under/i, "rejects path escaping an allowed root through a symlink");
 });
 
 test("decompress keeps the block active after a file-mode call", async () => {
