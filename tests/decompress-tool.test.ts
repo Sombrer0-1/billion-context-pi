@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { rm, readFile, mkdtemp, symlink } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { tmpdir, homedir } from "node:os";
 import { join } from "node:path";
 import { createAcpExtension } from "../src/index.js";
 
@@ -145,6 +145,18 @@ test("decompress toFile rejects paths that escape an allowed root via a symlink"
   const res = await decompressTool.execute("tc-sym", { blockId: "b1", toFile: target }, undefined, undefined, ctx);
   const text = (res.content[0] as any).text as string;
   assert.match(text, /must be under/i, "rejects path escaping an allowed root through a symlink");
+});
+
+test("decompress toFile rejects a dangling symlink whose target escapes the allowed roots", async () => {
+  const { decompressTool, ctx } = await setupWithCompressedBlock();
+  const jail = await mkdtemp(join(tmpdir(), "pai-acp-jail-dangling-"));
+  const link = join(jail, "dangling-link");
+  const escapedTarget = join(homedir(), `acp-dangling-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+  await symlink(escapedTarget, link);
+  const target = join(link, "out.txt");
+  const res = await decompressTool.execute("tc-sym2", { blockId: "b1", toFile: target }, undefined, undefined, ctx);
+  const text = (res.content[0] as any).text as string;
+  assert.match(text, /must be under/i, "rejects a dangling symlink that would write outside allowed roots");
 });
 
 test("decompress keeps the block active after a file-mode call", async () => {

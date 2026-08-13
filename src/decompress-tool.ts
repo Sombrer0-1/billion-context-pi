@@ -5,7 +5,7 @@ import { debug, logError, logInfo, logThrow } from "./log.js";
 import { parseBlockIdArg, collectBlockContent, type CompressionBlock } from "acp-kernel";
 import { entriesToCoreMessages } from "./messages.js";
 import { writeFile, mkdir } from "node:fs/promises";
-import { existsSync, realpathSync } from "node:fs";
+import { existsSync, lstatSync, readlinkSync, realpathSync } from "node:fs";
 import { resolve, relative, isAbsolute, join, basename, dirname } from "node:path";
 import { tmpdir, homedir } from "node:os";
 
@@ -79,7 +79,22 @@ function resolveToFilePath(targetPath: string): string | { error: string } {
     probe = dirname(probe);
   }
   const real = existsSync(probe) ? realpathSync(probe) : probe;
-  const checked = join(real, ...suffix);
+  // Re-resolve any dangling symlinks among the suffix components. existsSync
+  // follows links, so a symlink whose target does not (yet) exist is treated
+  // as non-existent and skipped by the walk above — but writing through it
+  // would land at the (possibly outside) target. Resolve via lstat/readlink.
+  let checked = real;
+  for (const part of suffix) {
+    checked = join(checked, part);
+    try {
+      if (lstatSync(checked).isSymbolicLink()) {
+        const target = readlinkSync(checked);
+        checked = isAbsolute(target) ? resolve(target) : resolve(dirname(checked), target);
+      }
+    } catch {
+      // not statable or not a symlink — keep the literal component
+    }
+  }
   // Compare against realpath'd roots too: tmpdir() often sits behind a
   // symlink (/var -> /private/var on macOS) and the string forms diverge.
   const allowed = ALLOWED_DIRS.map((d) => {
