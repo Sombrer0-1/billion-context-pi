@@ -151,7 +151,12 @@ Create `~/.pi/acp.json` (global) and/or `<project>/.pi/acp.json` (project-local,
   "toolOutputMaxBytes": 200000,
   "maxContextLimit": "75%",
   "emergencyThresholdPercent": "95%",
-  "nudgeGrowthTokens": 50000
+  "nudgeGrowthTokens": 50000,
+
+  "prompts": {
+    "compressPhilosophy": "Override the kernel's compression philosophy..."
+  },
+  "acknowledgePromptsRisk": true
 }
 ```
 
@@ -166,8 +171,10 @@ Create `~/.pi/acp.json` (global) and/or `<project>/.pi/acp.json` (project-local,
 | `maxContextLimit` | `"75%"` | Context usage threshold that triggers **forced compression** nudges (bypasses growth-gate + cadence). Accepts a ratio (`0.75`) or percent string (`"75%"`). Lower = compress earlier / more aggressively. Maps to kernel `nudge.maxContextLimitPct`. |
 | `emergencyThresholdPercent` | `"95%"` | Context usage threshold that triggers **emergency truncation** of large tool outputs to keep the session alive. Accepts a ratio (`0.95`) or percent string (`"95%"`). Must be ≥ `maxContextLimit`. Maps to kernel `nudge.emergencyThresholdPct` + `truncate.threshold`. |
 | `nudgeGrowthTokens` | `50000` | Token growth step for soft compression nudges. A nudge fires roughly every time this many tokens become compressible. Lower = compress more often; higher = compress less often. Maps to kernel `nudge.growthFloor` + `nudge.growthCap`. |
+| `prompts` | *(kernel defaults)* | Override acp-kernel's 4 load-bearing compression prompt rules (`compressPhilosophy`, `howToCompressRules`, `tier2DistillRules`, `tier3CondenseRules`). Each set field replaces the default verbatim; omitted fields are inherited. Non-string values are dropped. Requires `acknowledgePromptsRisk: true` — otherwise overrides are ignored and defaults are used. |
+| `acknowledgePromptsRisk` | `false` | Safety gate for `prompts` overrides. Set `true` to acknowledge that replacing the tuned compression rules may reduce summary quality (lost paths/signatures/decisions → worse retrieval) and to make overrides take effect. |
 
-> **Only these nine keys are read from `acp.json`.** Other tuning knobs (`preserveRecentMessages`, `protectedTools`) are code-level and not user-overridable. The three nudge thresholds (`maxContextLimit`, `emergencyThresholdPercent`, `nudgeGrowthTokens`) form a three-tier escalation: growth-driven soft nudges → forced nudges at `maxContextLimit` → emergency truncation at `emergencyThresholdPercent`.
+> **Only these eleven keys are read from `acp.json`.** Other tuning knobs (`preserveRecentMessages`, `protectedTools`) are code-level and not user-overridable. The three nudge thresholds (`maxContextLimit`, `emergencyThresholdPercent`, `nudgeGrowthTokens`) form a three-tier escalation: growth-driven soft nudges → forced nudges at `maxContextLimit` → emergency truncation at `emergencyThresholdPercent`.
 
 ### Environment variables
 

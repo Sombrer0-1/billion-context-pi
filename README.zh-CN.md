@@ -150,7 +150,12 @@ billion-context-pi 开箱即用,无需任何配置。可以在 JSON 配置文件
   "toolOutputMaxBytes": 200000,
   "maxContextLimit": "75%",
   "emergencyThresholdPercent": "95%",
-  "nudgeGrowthTokens": 50000
+  "nudgeGrowthTokens": 50000,
+
+  "prompts": {
+    "compressPhilosophy": "覆盖内核的压缩理念……"
+  },
+  "acknowledgePromptsRisk": true
 }
 ```
 
@@ -165,8 +170,10 @@ billion-context-pi 开箱即用,无需任何配置。可以在 JSON 配置文件
 | `maxContextLimit` | `"75%"` | 上下文使用率达到此值时触发**强制压缩** nudge(绕过增长门控 + 频率限制)。支持比例(`0.75`)或百分比字符串(`"75%"`)。调小 → 更早/更激进压缩。映射到内核 `nudge.maxContextLimitPct`。 |
 | `emergencyThresholdPercent` | `"95%"` | 上下文使用率达到此值时触发**紧急截断**,硬截断大块工具输出以保住会话。支持比例(`0.95`)或百分比字符串(`"95%"`)。必须 ≥ `maxContextLimit`。映射到内核 `nudge.emergencyThresholdPct` + `truncate.threshold`。 |
 | `nudgeGrowthTokens` | `50000` | 软压缩 nudge 的增长步长(token)。大约每积累这么多可压缩 token 就触发一次 nudge。调小 → 压得更频繁;调大 → 压得更少。映射到内核 `nudge.growthFloor` + `nudge.growthCap`。 |
+| `prompts` | *(内核默认)* | 覆盖 acp-kernel 的 4 条承重压缩提示词规则(`compressPhilosophy`、`howToCompressRules`、`tier2DistillRules`、`tier3CondenseRules`)。每个设置的字段逐字替换默认值;省略的字段继承默认。非字符串值被丢弃。需要 `acknowledgePromptsRisk: true`——否则覆盖被忽略,使用默认值。 |
+| `acknowledgePromptsRisk` | `false` | `prompts` 覆盖的安全门禁。设为 `true` 以确认替换调优过的压缩规则可能降低摘要质量(丢失路径/签名/决策 → 检索变差),并使覆盖生效。 |
 
-> **只有这九个 key 会被 `acp.json` 读取。** 其他调优参数(`preserveRecentMessages`、`protectedTools`)是代码级的,不向用户开放。三个 nudge 阈值(`maxContextLimit`、`emergencyThresholdPercent`、`nudgeGrowthTokens`)构成三级触发:增长驱动的软 nudge → `maxContextLimit` 强制 nudge → `emergencyThresholdPercent` 紧急截断。
+> **只有这十一个 key 会被 `acp.json` 读取。** 其他调优参数(`preserveRecentMessages`、`protectedTools`)是代码级的,不向用户开放。三个 nudge 阈值(`maxContextLimit`、`emergencyThresholdPercent`、`nudgeGrowthTokens`)构成三级触发:增长驱动的软 nudge → `maxContextLimit` 强制 nudge → `emergencyThresholdPercent` 紧急截断。
 
 ### 环境变量
 

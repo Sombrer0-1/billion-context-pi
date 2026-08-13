@@ -56,6 +56,17 @@
 }
 ```
 
+覆盖内核某条压缩提示词规则的高级配置（需要风险确认）：
+
+```json
+{
+  "prompts": {
+    "compressPhilosophy": "我的自定义压缩理念文本……"
+  },
+  "acknowledgePromptsRisk": true
+}
+```
+
 ---
 
 ## 参数总览
@@ -94,6 +105,13 @@
 | `compress.maxContextLimit` | number \| string | `"75%"` | 🟢 ACTIVE | 触发强制压缩 nudge 的上下文阈值。 |
 | `compress.emergencyThresholdPercent` | number \| string | `"95%"` | 🟢 ACTIVE | 触发紧急截断的上下文阈值。 |
 | `compress.nudgeGrowthTokens` | number | `50000` | 🟢 ACTIVE | 软压缩 nudge 的 token 增长步长。 |
+
+**prompts 键**
+
+| 键 | 类型 | 默认值 | 状态 | 说明 |
+|----|------|--------|------|------|
+| `prompts` | object | *(内核默认)* | 🟢 ACTIVE | 覆盖 acp-kernel 的 4 条承重压缩提示词规则。每个设置的字段逐字替换默认值。 |
+| `acknowledgePromptsRisk` | boolean | `false` | 🟢 ACTIVE | 必须为 `true`，`prompts` 覆盖才会生效；否则覆盖被丢弃、使用默认值。 |
 
 **环境变量**
 
@@ -201,6 +219,44 @@
 - **默认值：** `50000`
 - **状态：** 🟢 ACTIVE
 - **说明：** 控制**软**压缩 nudge 频率的 token 增长阈值。每当积累约这么多新可压缩内容时，触发一次软 nudge。值越低模型被 nudge 压缩的频率越高；值越低频率越低。此设置只控制*基于增长的* nudge——用量越过 `compress.maxContextLimit` 后，强制 nudge 接管，不受此设置影响。映射到内核设置 `nudge.growthFloor` 和 `nudge.growthCap`。
+
+---
+
+## 提示词自定义
+
+`prompts` 对象覆盖 acp-kernel 的**承重**压缩提示词规则——即模型收到的关于*如何*写摘要的逐字指令（保留完整文件路径、函数签名、决策与理由；丢弃冗长日志等）。这四个字段被嵌入系统提示词和压缩 nudge 文本：
+
+| 字段 | 控制内容 |
+|------|----------|
+| `compressPhilosophy` | 要避免的两种失败模式（过度/不足压缩），以及何时压缩的唯一判据。 |
+| `howToCompressRules` | Tier-1 规则：哪些内容需逐字保留、哪些需丢弃，以及摘要优先级顺序。 |
+| `tier2DistillRules` | Tier-2 蒸馏规则（仅决策/结果）。 |
+| `tier3CondenseRules` | Tier-3 超级浓缩规则（仅核心事实）。 |
+
+> ⚠️ **质量风险。** 这些规则是为检索质量调优的。用更宽松的文本替换它们会悄无声息地降低摘要质量——丢失路径、签名和决策会导致后续重建变差。`acknowledgePromptsRisk` 门禁的存在，是为了让这成为一个明确、深思熟虑的选择。
+
+### `prompts`
+
+- **类型：** `object`（部分覆盖——省略字段则保持其默认值）
+- **默认值：** *(内核默认)* —— acp-kernel 内置的逐字规则
+- **状态：** 🟢 ACTIVE
+- **说明：** 覆盖四个压缩提示词字段中的一个或多个。你设置的每个字段**逐字**替换内核默认值；省略的字段原样继承。非字符串值会被静默丢弃（只有明确的字符串覆盖才生效）。需要 `acknowledgePromptsRisk: true`——否则所有覆盖被丢弃并使用默认值，同时记录一条警告。示例：
+
+  ```json
+  {
+    "prompts": {
+      "tier3CondenseRules": "每个块浓缩为一行。只保留结果。"
+    },
+    "acknowledgePromptsRisk": true
+  }
+  ```
+
+### `acknowledgePromptsRisk`
+
+- **类型：** `boolean`
+- **默认值：** `false`
+- **状态：** 🟢 ACTIVE
+- **说明：** `prompts` 覆盖的安全门禁。设为 `true` 以确认替换内核调优的压缩规则可能降低摘要质量，并使你的 `prompts` 覆盖生效。为 `false`（或省略）时，所有 `prompts` 覆盖被忽略，使用内核默认值。如果 `resolvePrompts` 拒绝了你的覆盖（例如某个仍通过类型检查的畸形值），扩展会回退到默认值并记录 `prompts-resolve-failed` 警告，而不是启动失败。
 
 ---
 
