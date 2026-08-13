@@ -91,10 +91,15 @@ function resolvePiBin() {
 
 function runNpm(args) {
   const npmBin = process.platform === "win32" ? "npm.cmd" : "npm";
-  const r = spawnSync(npmBin, args, { cwd: ROOT, stdio: "pipe", shell: false });
+  const r = spawnSync(npmBin, args, {
+    cwd: ROOT,
+    stdio: "pipe",
+    shell: process.platform === "win32",
+  });
   if (r.status !== 0) {
-    process.stderr.write(r.stdout?.toString());
-    process.stderr.write(r.stderr?.toString());
+    if (r.stdout) process.stderr.write(r.stdout.toString());
+    if (r.stderr) process.stderr.write(r.stderr.toString());
+    if (r.error) failMsg(String(r.error));
     throw new Error(`npm ${args.join(" ")} failed (exit ${r.status})`);
   }
 }
