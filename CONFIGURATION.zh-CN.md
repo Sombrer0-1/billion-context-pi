@@ -56,12 +56,15 @@
 }
 ```
 
-覆盖内核某条压缩提示词规则的高级配置（需要风险确认）：
+覆盖内核压缩提示词规则的高级配置（需要风险确认）。只设置你想改的字段，其余继承内核默认值：
 
 ```json
 {
   "prompts": {
-    "compressPhilosophy": "我的自定义压缩理念文本……"
+    "compressPhilosophy": "我的压缩理念……",
+    "howToCompressRules": "我的 tier-1 规则……",
+    "tier2DistillRules": "我的 tier-2 蒸馏规则……",
+    "tier3CondenseRules": "我的 tier-3 浓缩规则……"
   },
   "acknowledgePromptsRisk": true
 }
@@ -245,7 +248,10 @@
   ```json
   {
     "prompts": {
-      "tier3CondenseRules": "每个块浓缩为一行。只保留结果。"
+      "compressPhilosophy": "激进压缩；优先保留信号而非完整性。",
+      "howToCompressRules": "逐字保留文件路径+签名。丢弃冗长日志。",
+      "tier2DistillRules": "仅决策与结果；丢弃过程和路径。",
+      "tier3CondenseRules": "每个块一行：仅核心事实。"
     },
     "acknowledgePromptsRisk": true
   }

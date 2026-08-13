@@ -154,7 +154,10 @@ Create `~/.pi/acp.json` (global) and/or `<project>/.pi/acp.json` (project-local,
   "nudgeGrowthTokens": 50000,
 
   "prompts": {
-    "compressPhilosophy": "Override the kernel's compression philosophy..."
+    "compressPhilosophy": "Override the compression philosophy...",
+    "howToCompressRules": "Override tier-1 rules...",
+    "tier2DistillRules": "Override tier-2 distillation rules...",
+    "tier3CondenseRules": "Override tier-3 condensation rules..."
   },
   "acknowledgePromptsRisk": true
 }

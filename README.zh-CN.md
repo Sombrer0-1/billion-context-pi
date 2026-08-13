@@ -153,7 +153,10 @@ billion-context-pi 开箱即用,无需任何配置。可以在 JSON 配置文件
   "nudgeGrowthTokens": 50000,
 
   "prompts": {
-    "compressPhilosophy": "覆盖内核的压缩理念……"
+    "compressPhilosophy": "覆盖压缩理念……",
+    "howToCompressRules": "覆盖 tier-1 规则……",
+    "tier2DistillRules": "覆盖 tier-2 蒸馏规则……",
+    "tier3CondenseRules": "覆盖 tier-3 浓缩规则……"
   },
   "acknowledgePromptsRisk": true
 }

@@ -56,12 +56,15 @@ A minimal config enabling only debug logging:
 }
 ```
 
-An advanced config overriding one of the kernel's compression prompt rules (requires the risk acknowledgement):
+An advanced config overriding the kernel's compression prompt rules (requires the risk acknowledgement). Set only the fields you want to change; the rest inherit the kernel defaults:
 
 ```json
 {
   "prompts": {
-    "compressPhilosophy": "My custom compression philosophy text..."
+    "compressPhilosophy": "My compression philosophy...",
+    "howToCompressRules": "My tier-1 rules...",
+    "tier2DistillRules": "My tier-2 distillation rules...",
+    "tier3CondenseRules": "My tier-3 condensation rules..."
   },
   "acknowledgePromptsRisk": true
 }
@@ -245,7 +248,10 @@ The `prompts` object overrides acp-kernel's **load-bearing** compression prompt 
   ```json
   {
     "prompts": {
-      "tier3CondenseRules": "Condense to a single line per block. Preserve only the outcome."
+      "compressPhilosophy": "Compress aggressively; prefer signal over completeness.",
+      "howToCompressRules": "Keep file paths + signatures verbatim. Drop verbose logs.",
+      "tier2DistillRules": "Decisions and outcomes only; drop process and paths.",
+      "tier3CondenseRules": "One line per block: bare facts only."
     },
     "acknowledgePromptsRisk": true
   }
