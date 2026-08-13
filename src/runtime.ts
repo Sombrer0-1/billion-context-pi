@@ -47,8 +47,8 @@ export interface AcpRuntime {
 
 function mergeLiveEntries(entries: SessionEntry[], live: AgentMessage[], state: CompressionState, origins: LiveRefOrigin[]): SessionEntry[] {
   const persisted = entries.filter((e): e is SessionMessageEntry => e.type === "message");
-  const matched = matchSuffixRun(persisted, live, (entry, message) => sameMessage(entry.message, message));
-  const prior = matchSuffixRun(origins, live, (origin, message) => origin.identity === messageIdentity(message));
+  const matched = matchUniqueLongestRun(persisted, live, (entry, message) => sameMessage(entry.message, message));
+  const prior = matchUniqueLongestRun(origins, live, (origin, message) => origin.identity === messageIdentity(message));
   const out: SessionEntry[] = [];
   const nextOrigins: LiveRefOrigin[] = [];
   const usedIds = new Set<string>();
@@ -103,30 +103,35 @@ function migrateLiveRefs(state: CompressionState, liveId: string, stableId: stri
   }
 }
 
-function matchSuffixRun<T>(candidates: T[], live: AgentMessage[], matches: (candidate: T, message: AgentMessage) => boolean): Array<T | undefined> {
+function matchUniqueLongestRun<T>(candidates: T[], live: AgentMessage[], matches: (candidate: T, message: AgentMessage) => boolean): Array<T | undefined> {
   const result: Array<T | undefined> = Array<T | undefined>(live.length).fill(undefined);
   let next: Uint32Array = new Uint32Array(live.length + 1);
   let current: Uint32Array = new Uint32Array(live.length + 1);
   let matchedCandidateStart = -1;
   let matchedLiveStart = -1;
+  let matchedLength = 0;
+  let ambiguous = false;
   for (let candidateIndex = candidates.length - 1; candidateIndex >= 0; candidateIndex--) {
     current.fill(0);
-    const suffixLength = candidates.length - candidateIndex;
     for (let liveIndex = live.length - 1; liveIndex >= 0; liveIndex--) {
       if (!matches(candidates[candidateIndex]!, live[liveIndex]!)) continue;
       const runLength = 1 + next[liveIndex + 1]!;
       current[liveIndex] = runLength;
-      if (runLength >= suffixLength) {
+      if (runLength > matchedLength) {
         matchedCandidateStart = candidateIndex;
         matchedLiveStart = liveIndex;
+        matchedLength = runLength;
+        ambiguous = false;
+      } else if (runLength === matchedLength) {
+        ambiguous = true;
       }
     }
     const previous = next;
     next = current;
     current = previous;
   }
-  if (matchedCandidateStart < 0) return result;
-  for (let index = 0; index < candidates.length - matchedCandidateStart; index++) {
+  if (matchedCandidateStart < 0 || ambiguous) return result;
+  for (let index = 0; index < matchedLength; index++) {
     result[matchedLiveStart + index] = candidates[matchedCandidateStart + index];
   }
   return result;
