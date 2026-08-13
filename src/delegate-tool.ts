@@ -3,10 +3,10 @@ import {
   type ChildProcess,
   type SpawnOptions,
 } from "node:child_process";
-import { createWriteStream, type WriteStream } from "node:fs";
+import { createWriteStream, existsSync, type WriteStream } from "node:fs";
 import { mkdir, mkdtemp, writeFile, rm, appendFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join, resolve as resolvePath } from "node:path";
 import { Type, type Static } from "typebox";
 import { delegateStatusWidget } from "./fleet-widget.js";
 import type {
@@ -37,6 +37,56 @@ export function delegateSpawnOptions(cwd: string, env: NodeJS.ProcessEnv): Spawn
     stdio: ["pipe", "pipe", "pipe"],
     shell: false,
   };
+}
+
+const PI_CLI_ENTRY_RE = /[\\/]pi-coding-agent[\\/]dist[\\/]cli\.js$/;
+const PI_PACKAGE_REL = join("@earendil-works", "pi-coding-agent", "dist", "cli.js");
+
+function probeUpFromArgv(argv1: string): string | null {
+  let dir = resolvePath(dirname(argv1) || process.cwd());
+  for (;;) {
+    const candidate = join(dir, "node_modules", PI_PACKAGE_REL);
+    if (existsSync(candidate)) return candidate;
+    const parent = dirname(dir);
+    if (parent === dir) return null;
+    dir = parent;
+  }
+}
+
+function piCliGlobalCandidates(env: NodeJS.ProcessEnv): string[] {
+  const candidates: string[] = [];
+  if (process.platform === "win32") {
+    if (env.APPDATA) candidates.push(join(env.APPDATA, "npm", "node_modules", PI_PACKAGE_REL));
+  } else {
+    const home = env.HOME ?? env.USERPROFILE;
+    if (home) candidates.push(join(home, ".local", "lib", "node_modules", PI_PACKAGE_REL));
+    candidates.push(join("/usr/local", "lib", "node_modules", PI_PACKAGE_REL));
+    candidates.push(join("/usr", "lib", "node_modules", PI_PACKAGE_REL));
+  }
+  return candidates;
+}
+
+/** Resolve the pi CLI entry for delegate child processes.
+ *  argv[1] is only the pi CLI under a CLI host; embedded hosts (e.g. pi-web)
+ *  run the SDK inside another node process, so probe instead. Non-pi hosts
+ *  (omp) keep argv[1] untouched. */
+export function resolvePiCliEntry(
+  argv1: string,
+  env: NodeJS.ProcessEnv = process.env,
+  piHost = true,
+): string {
+  const explicit = env.PI_CLI_PATH;
+  if (explicit) return explicit;
+  if (argv1 && PI_CLI_ENTRY_RE.test(argv1)) return argv1;
+  if (piHost) {
+    const probed = probeUpFromArgv(argv1);
+    if (probed) return probed;
+    for (const candidate of piCliGlobalCandidates(env)) {
+      if (existsSync(candidate)) return candidate;
+    }
+    logWarn("delegate", { event: "cli-entry-unresolved", argv1, fallback: "argv[1]" });
+  }
+  return argv1;
 }
 
 /** ACP context-management tools that every restricted delegate must retain
@@ -627,7 +677,7 @@ async function runDelegate(
 
   const child = spawn(
     process.execPath,
-    [process.argv[1]!, ...cliArgs],
+    [resolvePiCliEntry(process.argv[1] ?? "", process.env, isPiHost(ctx.sessionManager)), ...cliArgs],
     delegateSpawnOptions(cwd, childEnv),
   ) as ChildProcess;
   child.stdin?.once("error", (e: Error) => {
