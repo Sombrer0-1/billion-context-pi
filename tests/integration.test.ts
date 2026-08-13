@@ -583,6 +583,57 @@ test("empty live context preserves refs created for an unpersisted message", asy
   const state = JSON.parse(await readFile(`${stateFile}.acp.json`, "utf8"));
   assert.equal(state.messageRefs.byRaw["live-0"], "m00001");
 });
+test("omp keeps compression blocks active when provider context has an extra prefix", async (t) => {
+  const { api, handlers } = captureApi();
+  createAcpExtension({ modelContextLimit: 200_000 })(api as unknown as ExtensionAPI);
+  const dir = await mkdtemp(join(tmpdir(), "pai-acp-omp-provider-prefix-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const stateFile = join(dir, "session.json");
+  const texts = [
+    "This first message is large enough to compress. ".repeat(130),
+    "This second message is also part of the compressed range. ".repeat(130),
+    ...["three", "four", "five", "six", "seven"].map((n) => `filler ${n} `.repeat(400)),
+  ];
+  const persisted = texts.map((text, index) => userMsg(`e${index + 1}`, text));
+  const ctx = {
+    ...fakeCtx(persisted, stateFile),
+    sessionManager: {
+      getBranch: () => persisted,
+      getSessionId: () => "test-session",
+      getSessionFile: () => stateFile,
+    },
+  };
+  const initial = await handlers.get("context")![0]!(
+    { type: "context", messages: texts.map((text) => ({ role: "user", content: [{ type: "text", text }], timestamp: Date.now() })) },
+    ctx,
+  );
+  const first = initial.messages[0] as { content: Array<{ type?: string; text?: string }> };
+  const targetRef = first.content.find((block) => block.type === "text")!.text!.match(/m\d{5}/)![0];
+  const compressTool = api.tools.find((tool: { name: string }) => tool.name === "compress")!;
+  const compressed = await compressTool.execute(
+    "tc-omp-provider-prefix",
+    { content: [{ startId: targetRef, endId: "m00002", summary: "The first two messages were compressed into a durable ACP summary." }] },
+    undefined,
+    undefined,
+    ctx,
+  );
+  assert.match(compressed.content[0].text, /1 block/);
+
+  const next = await handlers.get("context")![0]!(
+    {
+      type: "context",
+      messages: [
+        { role: "user", content: [{ type: "text", text: "provider-only context prefix" }], timestamp: Date.now() },
+        ...texts.map((text) => ({ role: "user", content: [{ type: "text", text }], timestamp: Date.now() })),
+      ],
+    },
+    ctx,
+  );
+  const saved = JSON.parse(await readFile(`${stateFile}.acp.json`, "utf8"));
+  assert.equal(saved.blocks[0].active, true, "the compressed block must remain active after the prefix");
+  assert.ok(next.messages.length < texts.length + 1, "covered messages must be replaced in provider context");
+});
+
 
 test("delegate:false omits the ACP_DELEGATE NOTIFICATIONS section from the system prompt", () => {
   const { api, handlers } = captureApi();

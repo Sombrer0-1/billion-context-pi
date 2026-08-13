@@ -47,8 +47,8 @@ export interface AcpRuntime {
 
 function mergeLiveEntries(entries: SessionEntry[], live: AgentMessage[], state: CompressionState, origins: LiveRefOrigin[]): SessionEntry[] {
   const persisted = entries.filter((e): e is SessionMessageEntry => e.type === "message");
-  const matched = matchPersistedSuffix(persisted, live);
-  const prior = matchOrigins(origins, live);
+  const matched = matchSuffixRun(persisted, live, (entry, message) => sameMessage(entry.message, message));
+  const prior = matchSuffixRun(origins, live, (origin, message) => origin.identity === messageIdentity(message));
   const out: SessionEntry[] = [];
   const nextOrigins: LiveRefOrigin[] = [];
   const usedIds = new Set<string>();
@@ -68,21 +68,11 @@ function mergeLiveEntries(entries: SessionEntry[], live: AgentMessage[], state: 
     nextOrigins.push({ rawId: id, identity: messageIdentity(msg) });
   }
   origins.splice(0, origins.length, ...nextOrigins);
-  const unmatched = live.length - matched.length;
+  const unmatched = matched.reduce((count, entry) => count + (entry === undefined ? 1 : 0), 0);
   if (unmatched > 0) logInfo("runtime", { event: "merge-live-entries", live: live.length, unmatched });
   return out;
 }
 
-function matchOrigins(origins: LiveRefOrigin[], live: AgentMessage[]): Array<LiveRefOrigin | undefined> {
-  for (let start = 0; start < origins.length; start++) {
-    const count = origins.length - start;
-    if (count > live.length) continue;
-    if (origins.slice(start).every((origin, index) => origin.identity === messageIdentity(live[index]!))) {
-      return [...origins.slice(start), ...Array<undefined>(live.length - count)];
-    }
-  }
-  return Array<undefined>(live.length);
-}
 
 function nextLiveId(state: CompressionState, used: Set<string>, index: number): string {
   let id = `live-${index}`;
@@ -113,14 +103,33 @@ function migrateLiveRefs(state: CompressionState, liveId: string, stableId: stri
   }
 }
 
-function matchPersistedSuffix(persisted: SessionMessageEntry[], live: AgentMessage[]): SessionMessageEntry[] {
-  for (let start = 0; start < persisted.length; start++) {
-    const count = persisted.length - start;
-    if (count > live.length) continue;
-    const suffix = persisted.slice(start);
-    if (suffix.every((entry, index) => sameMessage(entry.message, live[index]!))) return suffix;
+function matchSuffixRun<T>(candidates: T[], live: AgentMessage[], matches: (candidate: T, message: AgentMessage) => boolean): Array<T | undefined> {
+  const result: Array<T | undefined> = Array<T | undefined>(live.length).fill(undefined);
+  let next: Uint32Array = new Uint32Array(live.length + 1);
+  let current: Uint32Array = new Uint32Array(live.length + 1);
+  let matchedCandidateStart = -1;
+  let matchedLiveStart = -1;
+  for (let candidateIndex = candidates.length - 1; candidateIndex >= 0; candidateIndex--) {
+    current.fill(0);
+    const suffixLength = candidates.length - candidateIndex;
+    for (let liveIndex = live.length - 1; liveIndex >= 0; liveIndex--) {
+      if (!matches(candidates[candidateIndex]!, live[liveIndex]!)) continue;
+      const runLength = 1 + next[liveIndex + 1]!;
+      current[liveIndex] = runLength;
+      if (runLength >= suffixLength) {
+        matchedCandidateStart = candidateIndex;
+        matchedLiveStart = liveIndex;
+      }
+    }
+    const previous = next;
+    next = current;
+    current = previous;
   }
-  return [];
+  if (matchedCandidateStart < 0) return result;
+  for (let index = 0; index < candidates.length - matchedCandidateStart; index++) {
+    result[matchedLiveStart + index] = candidates[matchedCandidateStart + index];
+  }
+  return result;
 }
 
 function sameMessage(a: AgentMessage, b: AgentMessage): boolean {
