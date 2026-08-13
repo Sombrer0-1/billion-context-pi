@@ -62,7 +62,7 @@ decompress restores previously compressed content and writes it to a file by def
 CONTEXT BREAKDOWN
 
 When context usage passes a threshold, the system appends a breakdown showing where tokens are spent. Compress the largest ranges first when the current step no longer needs them.
-  `;
+`;
 }
 
 export const ACP_DELEGATE_PROMPT = `

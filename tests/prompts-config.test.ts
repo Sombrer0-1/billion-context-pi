@@ -69,3 +69,20 @@ test("applyUserConfig flows prompts through to the adapter", () => {
   assert.equal(result.acknowledgePromptsRisk, true, "ack flag merged");
   assert.equal(result.modelContextLimit, 200_000, "other fields preserved");
 });
+
+test("buildAcpSystemPrompt default output is byte-stable (no trailing whitespace, full rules embedded)", () => {
+  const prompt = buildAcpSystemPrompt(defaultPrompts);
+  assert.ok(
+    prompt.endsWith("the current step no longer needs them.\n"),
+    "ends exactly like the master const — const->function refactor must not add trailing whitespace",
+  );
+  assert.equal(
+    /\s$/.test(prompt.replace(/\n$/, "")),
+    false,
+    "no trailing whitespace before the final newline",
+  );
+  assert.ok(prompt.includes(defaultPrompts.compressPhilosophy), "full compressPhilosophy embedded verbatim");
+  assert.ok(prompt.includes(defaultPrompts.howToCompressRules), "full howToCompressRules embedded verbatim");
+  assert.ok(prompt.includes(defaultPrompts.tier2DistillRules), "full tier2DistillRules embedded verbatim");
+  assert.ok(prompt.includes(defaultPrompts.tier3CondenseRules), "full tier3CondenseRules embedded verbatim");
+});
