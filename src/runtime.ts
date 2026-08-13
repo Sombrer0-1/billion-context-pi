@@ -10,6 +10,7 @@ import { resolveConfig, type AdapterConfig } from "./config.js";
 import { entriesToCoreMessages, extractText, matchesStoredText, messageIdentity, messageRef } from "./messages.js";
 import { SessionStateStore, type LiveRefOrigin } from "./state.js";
 import { logInfo, logWarn } from "./log.js";
+import { findUniqueLongestRun, type MatchRange } from "./sequence-match.js";
 
 type SessionEntrySource = {
   buildContextEntries?: () => SessionEntry[];
@@ -47,15 +48,17 @@ export interface AcpRuntime {
 
 function mergeLiveEntries(entries: SessionEntry[], live: AgentMessage[], state: CompressionState, origins: LiveRefOrigin[]): SessionEntry[] {
   const persisted = entries.filter((e): e is SessionMessageEntry => e.type === "message");
-  const matched = matchUniqueLongestRun(persisted, live, (entry, message) => sameMessage(entry.message, message));
-  const prior = matchUniqueLongestRun(origins, live, (origin, message) => origin.identity === messageIdentity(message));
+  const liveIdentities = live.map(messageIdentity);
+  const persistedIdentities = persisted.map((entry) => messageIdentity(entry.message));
+  const persistedRange = findUniqueLongestRun<MatchKey>(persistedIdentities, normalizePersistedMatchKeys(persisted, persistedIdentities, live, liveIdentities));
+  const originRange = findUniqueLongestRun(origins.map((origin) => origin.identity), liveIdentities);
   const out: SessionEntry[] = [];
   const nextOrigins: LiveRefOrigin[] = [];
   const usedIds = new Set<string>();
   for (let i = 0; i < live.length; i++) {
     const msg = live[i]!;
-    const entry = matched[i];
-    const origin = prior[i];
+    const entry = valueInRange(persisted, persistedRange, i);
+    const origin = valueInRange(origins, originRange, i);
     if (entry) {
       if (origin) migrateLiveRefs(state, origin.rawId, entry.id);
       else migrateTaggedRef(state, msg, entry.id);
@@ -65,10 +68,10 @@ function mergeLiveEntries(entries: SessionEntry[], live: AgentMessage[], state: 
     const id = origin?.rawId ?? nextLiveId(state, usedIds, i);
     usedIds.add(id);
     out.push({ type: "message", id, parentId: null, timestamp: String(msg.timestamp ?? Date.now()), message: msg });
-    nextOrigins.push({ rawId: id, identity: messageIdentity(msg) });
+    nextOrigins.push({ rawId: id, identity: liveIdentities[i]! });
   }
   origins.splice(0, origins.length, ...nextOrigins);
-  const unmatched = matched.reduce((count, entry) => count + (entry === undefined ? 1 : 0), 0);
+  const unmatched = live.length - (persistedRange?.length ?? 0);
   if (unmatched > 0) logInfo("runtime", { event: "merge-live-entries", live: live.length, unmatched });
   return out;
 }
@@ -103,57 +106,54 @@ function migrateLiveRefs(state: CompressionState, liveId: string, stableId: stri
   }
 }
 
-function matchUniqueLongestRun<T>(candidates: T[], live: AgentMessage[], matches: (candidate: T, message: AgentMessage) => boolean): Array<T | undefined> {
-  const result: Array<T | undefined> = Array<T | undefined>(live.length).fill(undefined);
-  let next: Uint32Array = new Uint32Array(live.length + 1);
-  let current: Uint32Array = new Uint32Array(live.length + 1);
-  let matchedCandidateStart = -1;
-  let matchedLiveStart = -1;
-  let matchedLength = 0;
-  let ambiguous = false;
-  for (let candidateIndex = candidates.length - 1; candidateIndex >= 0; candidateIndex--) {
-    current.fill(0);
-    for (let liveIndex = live.length - 1; liveIndex >= 0; liveIndex--) {
-      if (!matches(candidates[candidateIndex]!, live[liveIndex]!)) continue;
-      const runLength = 1 + next[liveIndex + 1]!;
-      current[liveIndex] = runLength;
-      if (runLength > matchedLength) {
-        matchedCandidateStart = candidateIndex;
-        matchedLiveStart = liveIndex;
-        matchedLength = runLength;
-        ambiguous = false;
-      } else if (runLength === matchedLength) {
-        ambiguous = true;
-      }
-    }
-    const previous = next;
-    next = current;
-    current = previous;
+type MatchKey = string | symbol;
+
+const NO_PERSISTED_MATCH = Symbol("no-persisted-match");
+
+function normalizePersistedMatchKeys(
+  persisted: readonly SessionMessageEntry[],
+  persistedIdentities: readonly string[],
+  live: readonly AgentMessage[],
+  liveIdentities: readonly string[],
+): MatchKey[] {
+  const persistedByStructure = new Map<string, number>();
+  for (let index = 0; index < persisted.length; index++) {
+    const key = toolResultStructureKey(persisted[index]!.message);
+    if (key === undefined) continue;
+    persistedByStructure.set(key, persistedByStructure.has(key) ? -1 : index);
   }
-  if (matchedCandidateStart < 0 || ambiguous) return result;
-  for (let index = 0; index < matchedLength; index++) {
-    result[matchedLiveStart + index] = candidates[matchedCandidateStart + index];
-  }
-  return result;
+  return live.map((message, liveIndex) => {
+    const key = toolResultStructureKey(message);
+    const candidateIndex = key === undefined ? undefined : persistedByStructure.get(key);
+    if (candidateIndex === undefined) return liveIdentities[liveIndex]!;
+    if (candidateIndex < 0) return NO_PERSISTED_MATCH;
+    return sameToolResult(persisted[candidateIndex]!.message, message)
+      ? persistedIdentities[candidateIndex]!
+      : liveIdentities[liveIndex]!;
+  });
 }
 
-function sameMessage(a: AgentMessage, b: AgentMessage): boolean {
-  try {
-    if (messageIdentity(a) === messageIdentity(b)) return true;
-    const ra = (a as { role?: string }).role;
-    const rb = (b as { role?: string }).role;
-    if (ra !== rb || ra !== "toolResult") return false;
-    const ca = (a as { content?: unknown }).content;
-    const cb = (b as { content?: unknown }).content;
-    return sameNonTextBlocks(ca, cb) && matchesStoredText(extractText(ca), extractText(cb));
-  } catch (e) {
-    logWarn("runtime", { event: "message-compare-failed", error: e instanceof Error ? e.message : String(e) });
-    return a === b;
-  }
+function toolResultStructureKey(message: AgentMessage): string | undefined {
+  if (message.role !== "toolResult") return undefined;
+  return `${message.toolName}\0${message.toolCallId}`;
+}
+
+function valueInRange<T>(values: readonly T[], range: MatchRange | undefined, liveIndex: number): T | undefined {
+  if (!range || liveIndex < range.liveStart || liveIndex >= range.liveStart + range.length) return undefined;
+  return values[range.candidateStart + liveIndex - range.liveStart];
+}
+
+function sameToolResult(stored: AgentMessage, visible: AgentMessage): boolean {
+  if (stored.role !== "toolResult" || visible.role !== "toolResult") return false;
+  return sameNonTextBlocks(stored.content, visible.content)
+    && matchesStoredText(extractText(stored.content), extractText(visible.content));
 }
 
 function sameNonTextBlocks(a: unknown, b: unknown): boolean {
-  const nonText = (blocks: unknown[]): unknown[] => blocks.filter((block) => (block as { type?: string }).type !== "text");
+  const nonText = (blocks: unknown[]): unknown[] => blocks.filter((block) => {
+    if (!block || typeof block !== "object" || !("type" in block)) return true;
+    return block.type !== "text";
+  });
   try {
     const na = Array.isArray(a) ? nonText(a) : [];
     const nb = Array.isArray(b) ? nonText(b) : [];
