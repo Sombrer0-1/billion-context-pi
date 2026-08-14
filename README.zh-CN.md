@@ -134,58 +134,9 @@ Blocks: 3 active (3.7K summary, 15.2K original compressed)
 
 ## 配置
 
-billion-context-pi 开箱即用,无需任何配置。可以在 JSON 配置文件中设置三个可选 key。
+billion-context-pi 开箱即用,无需任何配置——它会自动读取模型的上下文窗口并应用合理的默认值。
 
-### 配置文件
-
-创建 `~/.pi/acp.json`(全局)和/或 `<项目>/.pi/acp.json`(项目级,覆盖全局):
-
-```json
-{
-  "debug": false,
-  "autoUpdate": true,
-  "modelContextLimit": 200000,
-  "delegate": true,
-  "toolBashDefaultTimeout": 60,
-  "toolOutputMaxBytes": 200000,
-  "maxContextLimit": "75%",
-  "emergencyThresholdPercent": "95%",
-  "nudgeGrowthTokens": 50000,
-
-  "prompts": {
-    "compressPhilosophy": "覆盖压缩理念……",
-    "howToCompressRules": "覆盖 tier-1 规则……",
-    "tier2DistillRules": "覆盖 tier-2 蒸馏规则……",
-    "tier3CondenseRules": "覆盖 tier-3 浓缩规则……"
-  },
-  "acknowledgePromptsRisk": true
-}
-```
-
-| Key | 默认值 | 说明 |
-|-----|--------|------|
-| `debug` | `false` | 启用诊断日志(`error`/`warn`/`info` 始终写入 `~/.pi/acp.log`,此开关仅额外打开详细 `debug` 事件)。也可用环境变量 `ACP_DEBUG=1` 启用。 |
-| `autoUpdate` | `true` | Pi 启动时检查 npm 是否有更新版本并自动安装(限频:每 3 分钟最多一次检查)。禁用以避免所有启动时的网络请求。 |
-| `modelContextLimit` | *(自动)* | 覆盖上下文上限(token 数)。默认为模型的 `contextWindow`。 |
-| `delegate` | `true` | 启用 `acp_delegate` 工具(delegate/wait/cancel)及其系统提示词段落。设为 `false` 则不注册这些工具(例如你用了别的子代理扩展,或跑 headless 场景异步注入没有意义)。 |
-| `toolBashDefaultTimeout` | `60` | 当模型未指定 `timeout` 时注入 `bash` 工具的超时秒数。Pi **本身没有默认超时**,不加这个,一次遗漏的超时可能挂起几千秒。超时后会提示模型用更大的 `timeout` 重跑。设为 `0` 恢复 Pi 的无界行为。 |
-| `toolOutputMaxBytes` | `200000` | 工具结果文本硬上限(字节,约 5000 行 @ ~40 字节/行,通过 `tool_result` hook 应用)。用于兜住 Pi 自身 50KB/2000 行截断管不到的输出(例如 Pi 未加限制的工具)。触发截断时会告诉模型如何查看完整输出——对 `bash`,完整输出在其临时文件(`BashToolDetails.fullOutputPath`)中;设更小(如 `8192`)可更省上下文,设 `0` 关闭。 |
-| `maxContextLimit` | `"75%"` | 上下文使用率达到此值时触发**强制压缩** nudge(绕过增长门控 + 频率限制)。支持比例(`0.75`)或百分比字符串(`"75%"`)。调小 → 更早/更激进压缩。映射到内核 `nudge.maxContextLimitPct`。 |
-| `emergencyThresholdPercent` | `"95%"` | 上下文使用率达到此值时触发**紧急截断**,硬截断大块工具输出以保住会话。支持比例(`0.95`)或百分比字符串(`"95%"`)。必须 ≥ `maxContextLimit`。映射到内核 `nudge.emergencyThresholdPct` + `truncate.threshold`。 |
-| `nudgeGrowthTokens` | `50000` | 软压缩 nudge 的增长步长(token)。大约每积累这么多可压缩 token 就触发一次 nudge。调小 → 压得更频繁;调大 → 压得更少。映射到内核 `nudge.growthFloor` + `nudge.growthCap`。 |
-| `prompts` | *(内核默认)* | 覆盖 acp-kernel 的 4 条承重压缩提示词规则(`compressPhilosophy`、`howToCompressRules`、`tier2DistillRules`、`tier3CondenseRules`)。每个设置的字段逐字替换默认值;省略的字段继承默认。非字符串值被丢弃。需要 `acknowledgePromptsRisk: true`——否则覆盖被忽略,使用默认值。 |
-| `acknowledgePromptsRisk` | `false` | `prompts` 覆盖的安全门禁。设为 `true` 以确认替换调优过的压缩规则可能降低摘要质量(丢失路径/签名/决策 → 检索变差),并使覆盖生效。 |
-
-> **只有这十一个 key 会被 `acp.json` 读取。** 其他调优参数(`preserveRecentMessages`、`protectedTools`)是代码级的,不向用户开放。三个 nudge 阈值(`maxContextLimit`、`emergencyThresholdPercent`、`nudgeGrowthTokens`)构成三级触发:增长驱动的软 nudge → `maxContextLimit` 强制 nudge → `emergencyThresholdPercent` 紧急截断。
-
-### 环境变量
-
-| 变量 | 作用 |
-|------|------|
-| `ACP_AUTO_UPDATE` | 设为 `0` / `false` / `no` / `off`(不区分大小写)以禁用自动更新,覆盖配置值。 |
-| `ACP_MODEL_CONTEXT_LIMIT` | 覆盖上下文上限。优先级高于配置值。 |
-| `ACP_DEBUG` | 设为 `1` 或 `true` 启用 debug 日志(`error`/`warn`/`info` 始终写入,无需此开关)。 |
-| `ACP_LOG_FILE` | 覆盖日志文件路径(默认 `~/.pi/acp.log`)。 |
+行为通过可选的 `acp.json` 配置文件(`~/.pi/acp.json` 为全局默认,`<项目>/.pi/acp.json` 为项目级覆盖)以及若干环境变量来调优。完整参考——每个 key、类型、默认值与优先级顺序——请查阅 **[CONFIGURATION.zh-CN.md](./CONFIGURATION.zh-CN.md)** ([English](./CONFIGURATION.md))。
 
 ### 日志
 
