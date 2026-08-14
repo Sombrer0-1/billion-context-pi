@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { resolveConfig, resolveDelegate, type AdapterConfig } from "../src/config.js";
+import { resolveConfig, resolveCompress, mergeCompress, resolveDelegate, type AdapterConfig } from "../src/config.js";
 
 const EMPTY: AdapterConfig = {};
 
@@ -136,4 +136,66 @@ test("resolveDelegate: legacy flat displayUsage still works with undefined deleg
 test("resolveDelegate: object displayUsage takes priority over legacy flat", () => {
   const r = resolveDelegate({ delegate: { displayUsage: "separate" }, displayUsage: "merged" });
   assert.equal(r.displayUsage, "separate");
+});
+
+test("resolveCompress returns {} when no compress configured", () => {
+  assert.deepEqual(resolveCompress(undefined, "anthropic", "claude"), {});
+});
+
+test("resolveCompress falls back to global when provider/model unknown", () => {
+  const c = resolveCompress({ maxContextLimit: "75%" }, "unknown", "unknown");
+  assert.equal(c.maxContextLimit, "75%");
+});
+
+test("resolveCompress provider override wins over global", () => {
+  const compress = { maxContextLimit: "75%", providers: { anthropic: { maxContextLimit: "80%" } } };
+  assert.equal(resolveCompress(compress, "anthropic", undefined).maxContextLimit, "80%");
+  assert.equal(resolveCompress(compress, "openai", undefined).maxContextLimit, "75%");
+});
+
+test("resolveCompress model override wins over provider and global", () => {
+  const compress = {
+    maxContextLimit: "75%",
+    providers: { anthropic: { maxContextLimit: "80%", models: { "claude-sonnet-4": { maxContextLimit: "70%" } } } },
+  };
+  const c = resolveCompress(compress, "anthropic", "claude-sonnet-4");
+  assert.equal(c.maxContextLimit, "70%");
+});
+
+test("resolveCompress merges per-field (global/provider/model each set a different field)", () => {
+  const compress = {
+    maxContextLimit: "75%",
+    emergencyThresholdPercent: "95%",
+    providers: { anthropic: { emergencyThresholdPercent: "90%", models: { "claude-sonnet-4": { nudgeGrowthTokens: 30000 } } } },
+  };
+  const c = resolveCompress(compress, "anthropic", "claude-sonnet-4");
+  assert.equal(c.maxContextLimit, "75%", "global field inherited");
+  assert.equal(c.emergencyThresholdPercent, "90%", "provider field inherited");
+  assert.equal(c.nudgeGrowthTokens, 30000, "model field applied");
+});
+
+test("mergeCompress: undefined deeper field does not clear shallower value", () => {
+  const merged = mergeCompress({ maxContextLimit: "75%", nudgeGrowthTokens: 50000 }, { emergencyThresholdPercent: "90%" }, {});
+  assert.equal(merged.maxContextLimit, "75%");
+  assert.equal(merged.emergencyThresholdPercent, "90%");
+  assert.equal(merged.nudgeGrowthTokens, 50000);
+});
+
+test("resolveConfig applies provider/model cascade to kernel config", () => {
+  const adapter: AdapterConfig = {
+    compress: {
+      maxContextLimit: "75%",
+      providers: { anthropic: { models: { "claude-sonnet-4": { maxContextLimit: "70%", nudgeGrowthTokens: 30000 } } } },
+    },
+  };
+  const cfg = resolveConfig(adapter, 1_000_000, "anthropic", "claude-sonnet-4");
+  assert.equal(cfg.nudge.maxContextLimitPct, 0.7, "model-level maxContextLimit wins");
+  assert.equal(cfg.nudge.growthFloor, 30000);
+  assert.equal(cfg.nudge.growthCap, 30000);
+  assert.equal(cfg.nudge.emergencyThresholdPct, 0.95, "unset field inherits kernel default");
+});
+
+test("resolveConfig without provider/modelId behaves as before (global only)", () => {
+  const cfg = resolveConfig({ compress: { maxContextLimit: "80%" } }, 1_000_000);
+  assert.equal(cfg.nudge.maxContextLimitPct, 0.8);
 });

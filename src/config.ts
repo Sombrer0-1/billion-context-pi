@@ -14,9 +14,11 @@ export interface DelegateConfig {
   displayUsage?: "merged" | "separate";
 }
 
-/** Compression tuning. All fields accept a ratio (0.75) or percent string
- *  ("75%") where noted. */
-export interface CompressConfig {
+/** Compression tuning fields, shared by all three levels (global, provider,
+ *  model). Percentage fields accept a ratio (0.75) or percent string ("75%").
+ *  Resolution is per-field, deepest-wins (model > provider > global); an
+ *  undefined field at a deeper level does NOT clear a shallower value. */
+export interface CompressSettings {
   /** Context usage percentage that triggers forced compression nudges
    *  (bypasses growth-gate + cadence). Accepts a ratio (0.75) or percent
    *  string ("75%"). Default: 0.75. Maps to kernel nudge.maxContextLimitPct. */
@@ -29,6 +31,25 @@ export interface CompressConfig {
   /** Token growth threshold for soft compression nudges. Default: 50000.
    *  Maps to kernel nudge.growthFloor + nudge.growthCap. */
   nudgeGrowthTokens?: number;
+}
+
+/** Per-provider compression overrides. Carries the same tuning fields as the
+ *  global level, plus an optional per-model map keyed by model id. */
+export interface ProviderCompress extends CompressSettings {
+  /** Per-model overrides within this provider, keyed by model id
+   *  (e.g. "claude-sonnet-4-5"). */
+  models?: Record<string, CompressSettings>;
+}
+
+/** Compression tuning. Top-level fields are global defaults; `providers`
+ *  optionally narrows them per Pi provider name and per model id. The active
+ *  entry is resolved live each turn from the current model
+ *  (`ctx.model.provider` / `ctx.model.id`). */
+export interface CompressConfig extends CompressSettings {
+  /** Per-provider (and per-model) overrides, keyed by Pi provider name
+   *  (e.g. "anthropic", "openai", "zhipu") — the same name used in
+   *  models.json and `pi --provider`. */
+  providers?: Record<string, ProviderCompress>;
 }
 
 /**
@@ -106,7 +127,38 @@ export function resolveDelegate(adapter: AdapterConfig): { enabled: boolean; dis
   };
 }
 
-export function resolveConfig(adapter: AdapterConfig, liveContextLimit: number): Config {
+/** Per-field deepest-wins merge of the three compression levels (global →
+ *  provider → model). An undefined field at a deeper level does NOT clear a
+ *  value set at a shallower level — only a defined value overrides. */
+export function mergeCompress(
+  global?: CompressSettings,
+  provider?: CompressSettings,
+  model?: CompressSettings,
+): CompressSettings {
+  return {
+    maxContextLimit: model?.maxContextLimit ?? provider?.maxContextLimit ?? global?.maxContextLimit,
+    emergencyThresholdPercent: model?.emergencyThresholdPercent ?? provider?.emergencyThresholdPercent ?? global?.emergencyThresholdPercent,
+    nudgeGrowthTokens: model?.nudgeGrowthTokens ?? provider?.nudgeGrowthTokens ?? global?.nudgeGrowthTokens,
+  };
+}
+
+/** Resolve the effective compression settings for the active model: global →
+ *  provider (matched by Pi provider name) → model (matched by model id).
+ *  Returns a CompressSettings whose fields are undefined when nothing is set
+ *  at any level. The Pi adapter keys providers by name (ctx.model.provider),
+ *  not URL — it never sees the upstream URL the way the proxy does. */
+export function resolveCompress(
+  compress: CompressConfig | undefined,
+  provider: string | undefined,
+  modelId: string | undefined,
+): CompressSettings {
+  if (!compress) return {};
+  const prov = provider ? compress.providers?.[provider] : undefined;
+  const model = prov && modelId ? prov.models?.[modelId] : undefined;
+  return mergeCompress(compress, prov, model);
+}
+
+export function resolveConfig(adapter: AdapterConfig, liveContextLimit: number, provider?: string, modelId?: string): Config {
   const envLimit = process.env.ACP_MODEL_CONTEXT_LIMIT;
   const envLimitNum = envLimit ? Number(envLimit) : NaN;
   const FALLBACK_LIMIT = 150_000;
@@ -123,14 +175,14 @@ export function resolveConfig(adapter: AdapterConfig, liveContextLimit: number):
     preserveRecentMessages: adapter.preserveRecentMessages ?? 5,
     ...adapter.coreOverrides,
   });
-  const c = adapter.compress;
-  if (c?.maxContextLimit !== undefined) config.nudge.maxContextLimitPct = parsePercent(c.maxContextLimit);
-  if (c?.emergencyThresholdPercent !== undefined) {
+  const c = resolveCompress(adapter.compress, provider, modelId);
+  if (c.maxContextLimit !== undefined) config.nudge.maxContextLimitPct = parsePercent(c.maxContextLimit);
+  if (c.emergencyThresholdPercent !== undefined) {
     const pct = parsePercent(c.emergencyThresholdPercent);
     config.nudge.emergencyThresholdPct = pct;
     config.truncate.threshold = pct;
   }
-  if (c?.nudgeGrowthTokens !== undefined) {
+  if (c.nudgeGrowthTokens !== undefined) {
     config.nudge.growthFloor = c.nudgeGrowthTokens;
     config.nudge.growthCap = c.nudgeGrowthTokens;
   }

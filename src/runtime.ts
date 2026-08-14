@@ -207,7 +207,8 @@ export function createRuntime(adapter: AdapterConfig): AcpRuntime {
   }
 
   function configFor(ctx: ExtensionContext): Config {
-    return resolveConfig(adapterRef, liveContextLimit(ctx));
+    const m = ctx.model as { provider?: string; id?: string } | undefined;
+    return resolveConfig(adapterRef, liveContextLimit(ctx), m?.provider, m?.id);
   }
 
   async function stateFor(ctx: ExtensionContext, liveMessages?: AgentMessage[]) {

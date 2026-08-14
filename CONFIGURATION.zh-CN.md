@@ -223,6 +223,35 @@
 - **状态：** 🟢 ACTIVE
 - **说明：** 控制**软**压缩 nudge 频率的 token 增长阈值。每当积累约这么多新可压缩内容时，触发一次软 nudge。值越低模型被 nudge 压缩的频率越高；值越低频率越低。此设置只控制*基于增长的* nudge——用量越过 `compress.maxContextLimit` 后，强制 nudge 接管，不受此设置影响。映射到内核设置 `nudge.growthFloor` 和 `nudge.growthCap`。
 
+### `compress.providers` —— 按 provider / 按 model 覆盖
+
+- **类型：** object —— provider 名 → `{ ...<compress 字段>, models: { modelId → <compress 字段> } }` 的映射
+- **默认值：** *(未设置——全局 `compress.*` 对所有模型生效)*
+- **状态：** 🟢 ACTIVE
+- **说明：** 为某个特定的 Pi **provider** 和/或某个特定的 **model** 收窄全局阈值,每轮根据当前模型实时解析。三级**逐字段、深层优先**级联:`model > provider > global`。深层中未设置的字段**不会**清除浅层的值——只有你显式设置的字段才会覆盖。未知的 provider/model 回退到全局阈值。
+
+provider 的 key 是 **Pi provider 名**(如 `"anthropic"`、`"openai"`、`"zhipu"`)——即 `models.json` 和 `pi --provider` 使用的同一个名字。model 的 key 是 **model id**(`ctx.model.id`)。适配器工作在 Pi 的模型层,看不到 upstream URL,因此按**名字**匹配 provider,而不是像 billion-context 代理那样按 URL 前缀匹配。
+
+```json
+{
+  "compress": {
+    "maxContextLimit": "75%",
+    "emergencyThresholdPercent": "95%",
+    "nudgeGrowthTokens": 50000,
+    "providers": {
+      "anthropic": {
+        "maxContextLimit": "80%",
+        "models": {
+          "claude-sonnet-4-5": { "maxContextLimit": "70%", "nudgeGrowthTokens": 30000 }
+        }
+      }
+    }
+  }
+}
+```
+
+在 `anthropic` / `claude-sonnet-4-5` 下,生效阈值变为 `maxContextLimit=70%`、`nudgeGrowthTokens=30000`、`emergencyThresholdPercent=95%`(继承自全局)。
+
 ---
 
 ## 提示词自定义
