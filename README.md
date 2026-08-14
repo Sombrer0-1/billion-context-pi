@@ -135,58 +135,9 @@ Blocks: 3 active (3.7K summary, 15.2K original compressed)
 
 ## Configuration
 
-billion-context-pi works out of the box with no configuration. Three optional keys can be set in a JSON config file.
+billion-context-pi works out of the box with no configuration — it reads your model's context window automatically and applies sensible defaults.
 
-### Config file
-
-Create `~/.pi/acp.json` (global) and/or `<project>/.pi/acp.json` (project-local, overrides global):
-
-```json
-{
-  "debug": false,
-  "autoUpdate": true,
-  "modelContextLimit": 200000,
-  "delegate": true,
-  "toolBashDefaultTimeout": 60,
-  "toolOutputMaxBytes": 200000,
-  "maxContextLimit": "75%",
-  "emergencyThresholdPercent": "95%",
-  "nudgeGrowthTokens": 50000,
-
-  "prompts": {
-    "compressPhilosophy": "Override the compression philosophy...",
-    "howToCompressRules": "Override tier-1 rules...",
-    "tier2DistillRules": "Override tier-2 distillation rules...",
-    "tier3CondenseRules": "Override tier-3 condensation rules..."
-  },
-  "acknowledgePromptsRisk": true
-}
-```
-
-| Key | Default | Description |
-|-----|---------|-------------|
-| `debug` | `false` | Enable verbose **debug-level** events in the log. The always-on log (lifecycle events, errors, warnings) is written regardless; `debug` only adds extra diagnostics. Also enabled by env `ACP_DEBUG=1`. |
-| `autoUpdate` | `true` | On Pi startup, check npm for a newer version and auto-install it (throttled to one check per 3 minutes). Disable to avoid all startup network calls. |
-| `modelContextLimit` | *(auto)* | Override the context limit (in tokens). Defaults to the model's `contextWindow`. |
-| `delegate` | `true` | Enable the `acp_delegate` tools (delegate/wait/cancel) and their system-prompt section. Set `false` to skip registering them (e.g. you use a different sub-agent extension, or run headless where async injection adds no value). |
-| `toolBashDefaultTimeout` | `60` | Seconds injected into the `bash` tool when the model omits `timeout`. Pi has **no** default of its own, so without this a forgotten timeout can hang for thousands of seconds. On timeout the model is guided to re-run with a larger `timeout`. `0` restores Pi's unbounded behavior. |
-| `toolOutputMaxBytes` | `200000` | Hard byte cap on tool result text (~5000 lines at ~40 B/line; applied via the `tool_result` hook). Stops runaway output that Pi's own 50KB/2000-line cap can't catch (e.g. tools Pi doesn't cap). When it fires the model is told how to see the full output — for `bash` the full output is in its temp file (`BashToolDetails.fullOutputPath`); set lower (e.g. `8192`) for a tighter context budget, or `0` to disable. |
-| `maxContextLimit` | `"75%"` | Context usage threshold that triggers **forced compression** nudges (bypasses growth-gate + cadence). Accepts a ratio (`0.75`) or percent string (`"75%"`). Lower = compress earlier / more aggressively. Maps to kernel `nudge.maxContextLimitPct`. |
-| `emergencyThresholdPercent` | `"95%"` | Context usage threshold that triggers **emergency truncation** of large tool outputs to keep the session alive. Accepts a ratio (`0.95`) or percent string (`"95%"`). Must be ≥ `maxContextLimit`. Maps to kernel `nudge.emergencyThresholdPct` + `truncate.threshold`. |
-| `nudgeGrowthTokens` | `50000` | Token growth step for soft compression nudges. A nudge fires roughly every time this many tokens become compressible. Lower = compress more often; higher = compress less often. Maps to kernel `nudge.growthFloor` + `nudge.growthCap`. |
-| `prompts` | *(kernel defaults)* | Override acp-kernel's 4 load-bearing compression prompt rules (`compressPhilosophy`, `howToCompressRules`, `tier2DistillRules`, `tier3CondenseRules`). Each set field replaces the default verbatim; omitted fields are inherited. Non-string values are dropped. Requires `acknowledgePromptsRisk: true` — otherwise overrides are ignored and defaults are used. |
-| `acknowledgePromptsRisk` | `false` | Safety gate for `prompts` overrides. Set `true` to acknowledge that replacing the tuned compression rules may reduce summary quality (lost paths/signatures/decisions → worse retrieval) and to make overrides take effect. |
-
-> **Only these eleven keys are read from `acp.json`.** Other tuning knobs (`preserveRecentMessages`, `protectedTools`) are code-level and not user-overridable. The three nudge thresholds (`maxContextLimit`, `emergencyThresholdPercent`, `nudgeGrowthTokens`) form a three-tier escalation: growth-driven soft nudges → forced nudges at `maxContextLimit` → emergency truncation at `emergencyThresholdPercent`.
-
-### Environment variables
-
-| Variable | Effect |
-|----------|--------|
-| `ACP_AUTO_UPDATE` | Set to `0` / `false` / `no` / `off` (case-insensitive) to disable auto-update, overriding the config. |
-| `ACP_MODEL_CONTEXT_LIMIT` | Override the context limit. Takes precedence over the config value. |
-| `ACP_DEBUG` | Set to `1` or `true` to enable debug-level logging (always-on events are written regardless). |
-| `ACP_LOG_FILE` | Override the log file path (default `~/.pi/acp.log`). |
+Behavior is tuned via an optional `acp.json` config file (`~/.pi/acp.json` for global defaults, `<project>/.pi/acp.json` for per-project overrides) plus a few environment variables. For the complete reference — every key, type, default, and the precedence order — see **[CONFIGURATION.md](./CONFIGURATION.md)** ([中文](./CONFIGURATION.zh-CN.md)).
 
 ### Logging
 
