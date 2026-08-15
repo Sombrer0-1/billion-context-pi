@@ -43,9 +43,11 @@ test("/acp panel (kit-rendered) separates session accounting from sent view", as
   await acp.options.handler!("", ctx);
 
   const text = notified[0] ?? "";
-  assert.match(text, /Context \(session accounting\): 43% \(430k \/ 1\.0M\)/, text);
-  assert.match(text, /Sent to LLM \(after compression\): 24k/, text);
-  assert.match(text, /Session-only \(compressed originals \+ host overhead\): 406k/, text);
+  assert.match(text, /Context \(session accounting, host footer scale\): 43% \(430k \/ 1\.0M\) — never shrinks/, text);
+  assert.match(text, /Sent to LLM \(after compression, est\.\): 24k \(2% of limit\)/, text);
+  // unprunedTokens is passed from the same projection — Session-only derives
+  // on the estimation scale (issue #18), never 430k − 24k cross-scale.
+  assert.doesNotMatch(text, /406k/, "cross-scale subtraction must not appear");
   assert.match(text, /Token Breakdown \(sent view\):/, text);
   assert.doesNotMatch(text, /Framework/, "fake Framework bucket must be gone");
   const toolLine = text.split("\n").find((l) => l.trim().startsWith("Tool"))!;
