@@ -3,6 +3,7 @@ import type { AgentToolResult, ExtensionContext, ToolDefinition } from "@earendi
 import type { AcpRuntime } from "./runtime.js";
 import { buildStatusReport, defaultCountTokens, formatRanges } from "acp-kernel";
 import { estimateTokens, collectCoveredMessageIds } from "./tokens.js";
+import { getSystemPromptText } from "./compat.js";
 import { viableRanges } from "billion-context-kit";
 import { logThrow } from "./log.js";
 import { getDelegateUsage } from "./delegate-tool.js";
@@ -52,13 +53,18 @@ async function handleStatus(args: StatusArgs, runtime: AcpRuntime, ctx: Extensio
   // model actually receives. Without this, consumed/hidden compress calls and
   // pruned messages showed up in acp_status even though they never reached
   // the model.
-  const tokenCount = estimateTokens(coreMessages, collectCoveredMessageIds(state));
-  const realUsage = ctx.getContextUsage?.();
+  const coveredIds = collectCoveredMessageIds(state);
+  // Sent-view arbitration (same scale as the context transform): never the
+  // session-tree number from getContextUsage, which includes compressed
+  // originals and never shrinks (false emergencies; see src/index.ts).
+  const systemPromptText = getSystemPromptText(ctx);
+  const systemPromptTokens = systemPromptText ? defaultCountTokens(systemPromptText) : 0;
+  const sentTokens = estimateTokens(coreMessages, coveredIds) + systemPromptTokens;
   const turn = runtime.core.processTurn({
     messages: coreMessages,
     state,
     config,
-    tokenCount: realUsage?.tokens && realUsage.tokens > 0 ? realUsage.tokens : tokenCount,
+    tokenCount: sentTokens,
   });
   const processed = turn.messages;
 

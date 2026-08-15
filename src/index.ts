@@ -24,7 +24,8 @@ import { collectCoveredMessageIds, estimateTokens, lastUserMessageId } from "./t
 import { checkForUpdate } from "./update.js";
 import { runSetupAndNotify } from "./setup-subagent-tools.js";
 import { loadUserConfig, applyUserConfig } from "./user-config.js";
-import { formatSystemPromptForEvent } from "./compat.js";
+import { defaultCountTokens } from "acp-kernel";
+import { formatSystemPromptForEvent, getSystemPromptText } from "./compat.js";
 
 type AgentMessage = SessionMessageEntry["message"];
 
@@ -117,14 +118,22 @@ function wireContextTransform(pi: ExtensionAPI, runtime: AcpRuntime): void {
       const { state, coreMessages, entries } = await runtime.stateFor(ctx, event.messages);
       const config = runtime.configFor(ctx);
       const coveredIds = collectCoveredMessageIds(state);
-      // Prefer pi's real token count (anchored on provider usage) over our
-      // chars/4 estimate — it includes the system prompt, tool schemas, and
-      // trailing messages pi has not yet received a usage for. This is what the
-      // footer percentage reflects, so nudge usage/growth will match what the
-      // user sees.
+      // Nudge arbitration on the SENT-VIEW scale: chars/4 estimate over the
+      // pruned projection + measured system prompt. pi's real usage is
+      // anchored on the last assistant's provider-reported usage when
+      // available — close to the sent view — but it falls back to summing
+      // the whole session tree (originals included, never shrinks) when the
+      // provider reports no usage. After compression (or after switching to
+      // a smaller-window model) that tree number can exceed the window many
+      // times over while the real sent view is a few percent — permanent
+      // false EMERGENCY nudges while the session keeps working (omp issue
+      // #18 report; same host lineage). The tree-scale number is logged for
+      // diagnostics only.
       const realUsage = ctx.getContextUsage?.();
-      const estimated = estimateTokens(coreMessages, coveredIds);
-      const tokenCount = realUsage?.tokens && realUsage.tokens > 0 ? realUsage.tokens : estimated;
+      const systemPromptText = getSystemPromptText(ctx);
+      const systemPromptTokens = systemPromptText ? defaultCountTokens(systemPromptText) : 0;
+      const sentTokens = estimateTokens(coreMessages, coveredIds) + systemPromptTokens;
+      const tokenCount = sentTokens;
 
       debug.event("context-in", {
         sid,
@@ -132,9 +141,7 @@ function wireContextTransform(pi: ExtensionAPI, runtime: AcpRuntime): void {
         entries: entries.length,
         coreMsgs: coreMessages.length,
         tokenCount,
-        estimatedTokens: estimated,
-        realTokens: realUsage?.tokens ?? null,
-        realPercent: realUsage?.percent ?? null,
+        sessionTokens: realUsage?.tokens ?? null,
         limit: config.modelContextLimit,
         blocksBefore: state.blocks.length,
         activeBefore: state.blocks.filter((b) => b.active).length,
