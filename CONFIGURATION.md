@@ -223,6 +223,35 @@ The flow is:
 - **Status:** 🟢 ACTIVE
 - **Description:** The token-growth threshold that controls the cadence of **soft** compression nudges. A soft nudge fires roughly every time this many tokens of new compressible content accumulate. A lower value means the model is nudged to compress more often; a higher value means less frequent nudges. This only governs *growth-driven* nudges — once usage crosses `compress.maxContextLimit`, forced nudges take over regardless of this setting. Maps to the kernel settings `nudge.growthFloor` and `nudge.growthCap`.
 
+### `compress.providers` — per-provider & per-model overrides
+
+- **Type:** object — a map of provider name → `{ ...<compress fields>, models: { modelId → <compress fields> } }`
+- **Default:** *(unset — global `compress.*` applies to all models)*
+- **Status:** 🟢 ACTIVE
+- **Description:** Narrows the global thresholds for a specific Pi **provider** and/or a specific **model**, resolved live each turn from the active model. The three levels cascade **per-field, deepest-wins**: `model > provider > global`. A field left undefined at a deeper level does **not** clear a shallower value — only a field you actually set overrides. Unknown providers/models fall back to the global thresholds.
+
+The provider key is the **Pi provider name** (e.g. `"anthropic"`, `"openai"`, `"zhipu"`) — the same name used in `models.json` and `pi --provider`. The model key is the **model id** (`ctx.model.id`). The adapter sits at Pi's model layer and never sees the upstream URL, so it matches providers by **name**, not by URL prefix like the billion-context proxy does.
+
+```json
+{
+  "compress": {
+    "maxContextLimit": "75%",
+    "emergencyThresholdPercent": "95%",
+    "nudgeGrowthTokens": 50000,
+    "providers": {
+      "anthropic": {
+        "maxContextLimit": "80%",
+        "models": {
+          "claude-sonnet-4-5": { "maxContextLimit": "70%", "nudgeGrowthTokens": 30000 }
+        }
+      }
+    }
+  }
+}
+```
+
+On `anthropic` / `claude-sonnet-4-5` the effective thresholds become `maxContextLimit=70%`, `nudgeGrowthTokens=30000`, and `emergencyThresholdPercent=95%` (inherited from global).
+
 ---
 
 ## Prompts Customization
