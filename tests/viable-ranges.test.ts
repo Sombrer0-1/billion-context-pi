@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { VIABLE_RANGE_MIN_TOKENS, viableRanges } from "../src/messages.js";
+import { VIABLE_RANGE_MIN_TOKENS, viableRanges } from "billion-context-kit";
 import { buildStatusReport, createCore, createInitialState } from "acp-kernel";
 import { resolveConfig } from "../src/config.js";
 

@@ -14,7 +14,8 @@ import { makeSearchTool } from "./search-tool.js";
 import { makeStatusTool } from "./status-tool.js";
 import { makeDelegateTool, makeDelegateWaitTool, makeDelegateCancelTool, runningRunsSnapshot, resetDelegateUsage, setDelegateDisplayUsage } from "./delegate-tool.js";
 import { makeCommands } from "./commands.js";
-import { coreOutToAgentMessages, viableRanges } from "./messages.js";
+import { coreOutToAgentMessages } from "./messages.js";
+import { viableRanges } from "billion-context-kit";
 import { buildAcpSystemPrompt, ACP_DELEGATE_PROMPT } from "./system-prompt.js";
 import { delegateStatusWidget } from "./fleet-widget.js";
 import { wireToolGuardrails } from "./tool-guardrails.js";
@@ -192,7 +193,7 @@ function wireContextTransform(pi: ExtensionAPI, runtime: AcpRuntime): void {
       const emergency = turn.nudge.breakdown?.emergencyOverride === 1;
       // Recommend only ranges the model can actually compress: a tiny
       // fragmented range in the list makes batched attempts fail atomically
-      // (kernel validates the whole batch). See viableRanges in messages.ts.
+      // (kernel validates the whole batch). See viableRanges in billion-context-kit.
       turn.nudge.compressibleRanges = viableRanges(turn.nudge.compressibleRanges);
       const turnKey = lastUserMessageId(entries) ?? sid;
       const alreadyShown = !emergency && runtime.nudgeShownFor(turnKey);

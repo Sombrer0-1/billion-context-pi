@@ -1,10 +1,9 @@
 import type { ExtensionCommandContext, RegisteredCommand } from "@earendil-works/pi-coding-agent";
 import type { AcpRuntime } from "./runtime.js";
-import { defaultCountTokens, parseBlockIdArg, collectBlockContent, formatRanges } from "acp-kernel";
+import { defaultCountTokens, parseBlockIdArg, collectBlockContent } from "acp-kernel";
 import { getSystemPromptText } from "./compat.js";
-import { viableRanges } from "./messages.js";
+import { buildStatusPanel } from "billion-context-kit";
 import { getDelegateUsage } from "./delegate-tool.js";
-import { formatCompactTokens } from "./footer-status.js";
 
 declare const CURRENT_VERSION: string;
 
@@ -75,16 +74,6 @@ export function makeCommands(runtime: AcpRuntime): Array<{ name: string; options
   ];
 }
 
-function fmtTokens(n: number): string {
-  return formatCompactTokens(n);
-}
-
-function bar(value: number, total: number, width: number = 20): string {
-  if (total === 0) return "";
-  const filled = Math.max(0, Math.min(width, Math.round((value / total) * width)));
-  return "█".repeat(filled) + "░".repeat(width - filled);
-}
-
 async function statusReport(runtime: AcpRuntime, ctx: ExtensionCommandContext): Promise<string> {
   const { state, coreMessages } = await runtime.stateFor(ctx);
   const config = runtime.configFor(ctx);
@@ -95,111 +84,27 @@ async function statusReport(runtime: AcpRuntime, ctx: ExtensionCommandContext): 
   const tokenCount = realUsage?.tokens && realUsage.tokens > 0 ? realUsage.tokens : defaultCountTokens(coreMessages.map((m) => m.text ?? "").join("\n"));
 
   const turn = runtime.core.processTurn({ messages: coreMessages, state, config, tokenCount });
-  const nudge = turn.nudge;
-  const bd = nudge?.contextBreakdown;
-  const limit = config.modelContextLimit;
-  // displayTotal must reflect the REAL context size (what the footer shows),
-  // not just the sum of message-text categories. contextBreakdown only
-  // classifies message text via chars/4 and never sees pi's system prompt
-  // or tool schemas, so summing its fields undercounts. Split the gap into
-  // the real system prompt (measured) and the rest (tool schemas + the
-  // inevitable chars/4-vs-real-tokenizer drift).
-  const classified = bd ? bd.system + bd.tool + bd.summaries + bd.code + bd.text : 0;
+
+  // Shared kit surface renders the panel (dual accounting, viability
+  // filtering, bars, block list with topic fallback). Host-specific inputs:
   const systemPromptText = getSystemPromptText(ctx);
-  const systemPromptTokens = systemPromptText ? defaultCountTokens(systemPromptText) : 0;
-  const framework = bd ? Math.max(0, tokenCount - classified - systemPromptTokens) : 0;
-  const displayTotal = tokenCount;
-  const displayPct = limit > 0 ? Math.round((displayTotal / limit) * 100) : 0;
-  const activeBlocksList = state.blocks.filter((b) => b.active);
-  const totalBlocksList = state.blocks;
+  const versionStr = CURRENT_VERSION ? `billion-context-pi@${CURRENT_VERSION}` : undefined;
+  let text = buildStatusPanel({
+    version: versionStr,
+    tokenCount,
+    systemPromptTokens: systemPromptText ? defaultCountTokens(systemPromptText) : 0,
+    state: turn.state,
+    nudge: turn.nudge,
+    modelContextLimit: config.modelContextLimit,
+  });
 
-  const lines: string[] = [];
-
-  const versionStr = CURRENT_VERSION ? `billion-context-pi@${CURRENT_VERSION}` : "";
-
-  lines.push("╭─────────────────────────────────────────────╮");
-  lines.push("│           ACP Context Analysis              │");
-  lines.push("╰─────────────────────────────────────────────╯");
-  if (versionStr) lines.push(versionStr);
-  lines.push("");
-  lines.push(`Context: ${displayPct}% (${fmtTokens(displayTotal)} / ${fmtTokens(limit)})`);
-
-  if (nudge && bd) {
-    const growth = bd.growth;
-    if (growth > 0 && displayTotal > 0) {
-      lines.push(`Growth: +${fmtTokens(growth)} since last nudge`);
-    }
-    if (displayTotal > 0) {
-      lines.push("");
-      lines.push("Token Breakdown:");
-
-      const categories: Array<{ label: string; value: number }> = [
-        { label: "Tool", value: bd.tool },
-        { label: "SysPrompt", value: systemPromptTokens },
-        { label: "Framework", value: framework },
-        { label: "Text", value: bd.text },
-        { label: "Code", value: bd.code },
-        { label: "Summaries", value: bd.summaries },
-      ];
-
-      for (const cat of categories) {
-        if (cat.value <= 0) continue;
-        const pct = displayTotal > 0 ? Math.round((cat.value / displayTotal) * 100) : 0;
-        const b = bar(cat.value, displayTotal);
-        lines.push(`  ${cat.label.padEnd(10)} ${b} ${String(pct).padStart(3)}%  ${fmtTokens(cat.value)}`);
-      }
-    }
-  }
-
-  lines.push("");
-
-  if (nudge) {
-    if (nudge.shouldInject) {
-      const tierInfo = nudge.tier ? ` [T${nudge.tier} distillation]` : "";
-      lines.push(`Nudge: ACTIVE${tierInfo} — ${nudge.reason}`);
-    } else {
-      lines.push(`Nudge: idle — ${nudge.reason}`);
-    }
-  }
-
-  // Same viability filter as the LLM injection path (index.ts) and the
-  // status tool — tiny fragmented ranges are uncompressable noise the model
-  // never sees, so the panel shouldn't list them either.
-  const ranges = viableRanges(nudge?.compressibleRanges ?? []);
-  const protectedRanges = nudge?.protectedRanges ?? [];
-  if (ranges.length > 0 || protectedRanges.length > 0) {
-    lines.push("");
-    lines.push(formatRanges(ranges, protectedRanges));
-  }
-
-  if (activeBlocksList.length > 0) {
-    lines.push("");
-    lines.push(`Blocks: ${activeBlocksList.length} active / ${totalBlocksList.length} total (${fmtTokens(state.stats.tokensCompressed)} tokens compressed)`);
-    for (const b of activeBlocksList) {
-      const topic = b.topic ? `: ${b.topic}` : "";
-      const summaryTok = defaultCountTokens(b.summary || "");
-      const origTok = b.compressedTokens > 0 ? b.compressedTokens : summaryTok;
-      lines.push(`  [${b.blockId}] T${b.tier} ${fmtTokens(origTok)}\u2192${fmtTokens(summaryTok)}${topic}`);
-    }
-  } else if (totalBlocksList.length > 0) {
-    lines.push("");
-    lines.push(`Blocks: 0 active / ${totalBlocksList.length} total (${fmtTokens(state.stats.tokensCompressed)} tokens compressed)`);
-  } else {
-    lines.push("");
-    lines.push("Blocks: none (nothing compressed yet)");
-  }
-
-  lines.push("");
+  // pi-specific footer: delegate usage is tracked outside the main totals.
   const delegateUsage = getDelegateUsage();
   if (delegateUsage && delegateUsage.totalTokens > 0) {
-    lines.push("");
     const cost = delegateUsage.cost.total;
     const costStr = cost > 0 ? ` ($${cost.toFixed(4)})` : "";
-    lines.push("── Session delegate usage (excluded from main totals) ──");
-    lines.push(`Tokens: ${delegateUsage.input.toLocaleString()} in, ${delegateUsage.output.toLocaleString()} out (${delegateUsage.totalTokens.toLocaleString()} total)${costStr}`);
+    text += "\n\n── Session delegate usage (excluded from main totals) ──\n";
+    text += `Tokens: ${delegateUsage.input.toLocaleString()} in, ${delegateUsage.output.toLocaleString()} out (${delegateUsage.totalTokens.toLocaleString()} total)${costStr}`;
   }
-  lines.push("");
-  lines.push("Tag visibility: tags injected to LLM only (deep copy), not persisted in session, not shown in terminal.");
-
-  return lines.join("\n");
+  return text;
 }
