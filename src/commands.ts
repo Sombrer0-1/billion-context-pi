@@ -2,6 +2,7 @@ import type { ExtensionCommandContext, RegisteredCommand } from "@earendil-works
 import type { AcpRuntime } from "./runtime.js";
 import { defaultCountTokens, parseBlockIdArg, collectBlockContent, formatRanges } from "acp-kernel";
 import { getSystemPromptText } from "./compat.js";
+import { viableRanges } from "./messages.js";
 import { getDelegateUsage } from "./delegate-tool.js";
 import { formatCompactTokens } from "./footer-status.js";
 
@@ -161,7 +162,10 @@ async function statusReport(runtime: AcpRuntime, ctx: ExtensionCommandContext): 
     }
   }
 
-  const ranges = nudge?.compressibleRanges ?? [];
+  // Same viability filter as the LLM injection path (index.ts) and the
+  // status tool — tiny fragmented ranges are uncompressable noise the model
+  // never sees, so the panel shouldn't list them either.
+  const ranges = viableRanges(nudge?.compressibleRanges ?? []);
   const protectedRanges = nudge?.protectedRanges ?? [];
   if (ranges.length > 0 || protectedRanges.length > 0) {
     lines.push("");
