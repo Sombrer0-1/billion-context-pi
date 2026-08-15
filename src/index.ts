@@ -193,7 +193,7 @@ function wireContextTransform(pi: ExtensionAPI, runtime: AcpRuntime): void {
       const emergency = turn.nudge.breakdown?.emergencyOverride === 1;
       // Recommend only ranges the model can actually compress: a tiny
       // fragmented range in the list makes batched attempts fail atomically
-      // (kernel validates the whole batch). See viableRanges in messages.ts.
+      // (kernel validates the whole batch). See viableRanges in billion-context-kit.
       turn.nudge.compressibleRanges = viableRanges(turn.nudge.compressibleRanges);
       const turnKey = lastUserMessageId(entries) ?? sid;
       const alreadyShown = !emergency && runtime.nudgeShownFor(turnKey);
