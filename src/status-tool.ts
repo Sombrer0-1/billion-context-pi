@@ -3,6 +3,7 @@ import type { AgentToolResult, ExtensionContext, ToolDefinition } from "@earendi
 import type { AcpRuntime } from "./runtime.js";
 import { buildStatusReport, defaultCountTokens, formatRanges } from "acp-kernel";
 import { estimateTokens, collectCoveredMessageIds } from "./tokens.js";
+import { viableRanges } from "./messages.js";
 import { logThrow } from "./log.js";
 import { getDelegateUsage } from "./delegate-tool.js";
 import { resolveDelegate } from "./config.js";
@@ -75,7 +76,7 @@ async function handleStatus(args: StatusArgs, runtime: AcpRuntime, ctx: Extensio
   if (args.scope) return base;
 
   const nudge = turn.nudge;
-  const ranges = nudge?.compressibleRanges ?? [];
+  const ranges = viableRanges(nudge?.compressibleRanges ?? []);
   const protectedRanges = nudge?.protectedRanges ?? [];
 
   const extra: string[] = [];
