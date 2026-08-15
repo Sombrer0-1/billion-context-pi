@@ -53,3 +53,28 @@ test("/acp panel (kit-rendered) separates session accounting from sent view", as
   const toolLine = text.split("\n").find((l) => l.trim().startsWith("Tool"))!;
   assert.match(toolLine, / 83%/, `bar percentages must use the sent view: ${toolLine}`);
 });
+
+test("/acp panel Session-only derives on the estimation scale (positive assertion)", async () => {
+  // Non-empty projection: 440K chars ≈ 110K tokens (chars/4) unpruned vs the
+  // stubbed 24K sent view → Session-only must read 86k — estimate minus
+  // estimate, never 430k − 24k (provider scale minus estimate).
+  const runtime = fakeRuntime();
+  (runtime.stateFor as () => Promise<unknown>) = async () => ({
+    state: { blocks: [], stats: { tokensCompressed: 0 }, messageRefs: { byRaw: {}, byRef: {} } },
+    coreMessages: [{ id: "p1", role: "user", contentType: "text", text: "a".repeat(440_000) }],
+  });
+  const notified: string[] = [];
+  const ctx = {
+    ui: { notify: (t: string) => notified.push(t) },
+    getContextUsage: () => ({ tokens: 430_000 }),
+    model: { contextWindow: 1_000_000 },
+    sessionManager: { getSessionId: () => "s2", getSessionFile: () => "/tmp/s2.json" },
+  } as unknown as ExtensionCommandContext;
+
+  const acp = makeCommands(runtime).find((c) => c.name === "acp")!;
+  await acp.options.handler!("", ctx);
+
+  const text = notified[0] ?? "";
+  assert.match(text, /Session-only \(compressed originals, est\.\): 86k — pruned from every request/, text);
+  assert.doesNotMatch(text, /406k/, "cross-scale subtraction must not appear");
+});

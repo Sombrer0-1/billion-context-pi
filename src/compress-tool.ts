@@ -7,6 +7,8 @@ import type {
 import type { AcpRuntime } from "./runtime.js";
 import { debug, logError, logInfo, logThrow } from "./log.js";
 import { estimateTokens, collectCoveredMessageIds } from "./tokens.js";
+import { defaultCountTokens } from "acp-kernel";
+import { getSystemPromptText } from "./compat.js";
 
 function formatK(n: number): string {
   return n >= 1000 ? `${(n / 1000).toFixed(1)}K` : String(n);
@@ -59,13 +61,19 @@ async function handleCompress(args: CompressArgs, runtime: AcpRuntime, ctx: Exte
   if (ranges.length === 0) return "No ranges provided.";
   const { state: initialState, coreMessages } = await runtime.stateFor(ctx);
   const config = runtime.configFor(ctx);
-  const estimatedTokens = estimateTokens(coreMessages, collectCoveredMessageIds(initialState));
-  const realUsage = ctx.getContextUsage?.();
+  // Sent-view arbitration — the same scale as the context transform and
+  // acp_status. processTurn here persists nudge stamps via the saved state,
+  // so a tree-scale tokenCount (provider fallback summing the whole session,
+  // never shrinks) would poison lastNudgeShownTokens/lastShownByTier at the
+  // wrong scale and suppress legitimate growth nudges afterward.
+  const systemPromptText = getSystemPromptText(ctx);
+  const systemPromptTokens = systemPromptText ? defaultCountTokens(systemPromptText) : 0;
+  const sentTokens = estimateTokens(coreMessages, collectCoveredMessageIds(initialState)) + systemPromptTokens;
   const turn = runtime.core.processTurn({
     messages: coreMessages,
     state: initialState,
     config,
-    tokenCount: realUsage?.tokens && realUsage.tokens > 0 ? realUsage.tokens : estimatedTokens,
+    tokenCount: sentTokens,
   });
   const state = turn.state;
   const messages = turn.messages;

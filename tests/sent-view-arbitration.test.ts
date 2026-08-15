@@ -74,6 +74,7 @@ test("context transform ignores session-tree accounting (180K window, 366K tree)
   branchEntries = entries;
   const r = await fire(handlers, entries, ctx);
   assert.equal(nudgeCount(r), 0, "no emergency nudge: sent view is well within the window");
+  await rm(`${STATE_FILE}.365606.acp.json`, { force: true });
 });
 
 test("context transform DOES go emergency when the sent view itself overflows", async () => {
@@ -90,4 +91,5 @@ test("context transform DOES go emergency when the sent view itself overflows", 
   branchEntries = entries;
   const r = await fire(handlers, entries, ctx);
   assert.ok(nudgeCount(r) >= 1, "emergency nudge fires on real sent-view overflow");
+  await rm(`${STATE_FILE}.1000.acp.json`, { force: true });
 });
