@@ -6,11 +6,11 @@ import { join } from "node:path";
 import { CONFIG_DIR_NAME, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { createInitialState, type CoreMessage } from "acp-kernel";
 import { createRuntime } from "../src/runtime.js";
-import { loadUserConfig, applyUserConfig } from "../src/user-config.js";
+import { loadUserConfig } from "../src/user-config.js";
 
 // E2E for the three-level compress cascade: writes a REAL acp.json and drives
-// the REAL production pipeline (loadUserConfig → applyUserConfig → setAdapter →
-// configFor, the exact functions wired at src/index.ts:71-72,117), as opposed
+// the REAL production pipeline (loadUserConfig → applyUserConfig → reloadConfig →
+// configFor, the exact functions wired at session_start / context events), as opposed
 // to the resolveCompress unit tests in config.test.ts.
 
 function ctxFor(provider: string | undefined, id: string | undefined, contextWindow: number): ExtensionContext {
@@ -52,7 +52,7 @@ test("e2e compress config: acp.json provider/model overrides take effect through
         assert.ok(user.compress, "acp.json compress block loaded from disk");
 
         const runtime = createRuntime({});
-        runtime.setAdapter(applyUserConfig(runtime.adapter, user));
+        await runtime.reloadConfig(cwd);
 
         const sonnet = runtime.configFor(ctxFor("anthropic", "claude-sonnet-4-5", 200_000));
         assert.equal(sonnet.nudge.maxContextLimitPct, 0.7, "model-level maxContextLimit 70% reaches the kernel");
@@ -75,7 +75,7 @@ test("e2e compress config: acp.json provider/model overrides take effect through
 test("e2e compress config: a single runtime resolves differently per model (proves per-turn, not static)", async () => {
     await withConfigDir(ACP_JSON, async (cwd) => {
         const runtime = createRuntime({});
-        runtime.setAdapter(applyUserConfig(runtime.adapter, await loadUserConfig(cwd)));
+        await runtime.reloadConfig(cwd);
         const sonnet = runtime.configFor(ctxFor("anthropic", "claude-sonnet-4-5", 200_000));
         const haiku = runtime.configFor(ctxFor("anthropic", "claude-haiku", 200_000));
         const openai = runtime.configFor(ctxFor("openai", "gpt-4o", 200_000));
@@ -91,7 +91,7 @@ test("e2e compress config: without a config file the kernel defaults apply", asy
         const user = await loadUserConfig(cwd);
         assert.deepEqual(user, {}, "no acp.json anywhere (HOME + cwd) → empty user config");
         const runtime = createRuntime({});
-        runtime.setAdapter(applyUserConfig(runtime.adapter, user));
+        await runtime.reloadConfig(cwd);
         const cfg = runtime.configFor(ctxFor("anthropic", "claude-sonnet-4-5", 200_000));
         assert.equal(cfg.nudge.maxContextLimitPct, 0.75, "kernel default maxContextLimitPct");
         assert.equal(cfg.nudge.emergencyThresholdPct, 0.95, "kernel default emergencyThresholdPct");
@@ -121,7 +121,7 @@ test("e2e compress config: a 2w limit fires the compress nudge at 2w tokens; a 1
     await withConfigDir(ACP_JSON, async (cwd) => {
         process.env.HOME = cwd;
         const runtime = createRuntime({});
-        runtime.setAdapter(applyUserConfig(runtime.adapter, await loadUserConfig(cwd)));
+        await runtime.reloadConfig(cwd);
         const tokenCount = 20_000;
 
         const small = runtime.configFor(ctxFor("openai", "gpt-4o", 20_000));

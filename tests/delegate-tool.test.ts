@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { buildChildArgs, delegateSpawnOptions, injectedWaitMessage, buildWaitResult, buildCancelResult, getDelegateUsage, resetDelegateUsage, injectResult } from "../src/delegate-tool.js";
+import { buildChildArgs, delegateSpawnOptions, injectedWaitMessage, buildWaitResult, buildCancelResult, getDelegateUsage, resetDelegateUsage, injectResult, resolveWaitTimeoutMs } from "../src/delegate-tool.js";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 
 /** Minimal ctx mock - buildChildArgs reads ctx.model and sessionManager. */
@@ -331,4 +331,31 @@ test("buildWaitResult merged mode does not accumulate delegateUsageTotal", () =>
   const result = buildWaitResult(run as any, "content", "merged");
   assert.ok(result.usage, "usage present in merged mode");
   assert.equal(getDelegateUsage(), undefined, "merged mode never accumulates");
+});
+
+// ─── resolveWaitTimeoutMs: small values treated as seconds (ISSUE-1) ──────
+
+test("resolveWaitTimeoutMs returns the default when undefined", () => {
+  assert.equal(resolveWaitTimeoutMs(undefined), 10_000);
+});
+
+test("resolveWaitTimeoutMs rescales sub-1000 values as seconds", () => {
+  assert.equal(resolveWaitTimeoutMs(180), 180_000);
+  assert.equal(resolveWaitTimeoutMs(60), 60_000);
+  assert.equal(resolveWaitTimeoutMs(1), 1_000);
+});
+
+test("resolveWaitTimeoutMs passes through values >= 1000 as ms, clamped to [1000, 300000]", () => {
+  assert.equal(resolveWaitTimeoutMs(1_000), 1_000);
+  assert.equal(resolveWaitTimeoutMs(45_000), 45_000);
+  assert.equal(resolveWaitTimeoutMs(300_000), 300_000);
+  assert.equal(resolveWaitTimeoutMs(500_000), 300_000);
+});
+
+test("resolveWaitTimeoutMs boundary: 999 → 300000 (seconds→clamp), 0/negative → 1000 floor", () => {
+  // The <1000 → seconds rescale means 999 becomes 999000 then clamps to the
+  // 300000 max — a sharp edge at the 999/1000 boundary, documented here.
+  assert.equal(resolveWaitTimeoutMs(999), 300_000);
+  assert.equal(resolveWaitTimeoutMs(0), 1_000);
+  assert.equal(resolveWaitTimeoutMs(-5), 1_000);
 });

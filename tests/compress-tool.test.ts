@@ -110,3 +110,44 @@ test("compress beforeTokens scales with calibrated density (Phase 2)", async () 
   // est 603 + tag overhead (4 msgs × ~21 chars / 4) ≈ 645 × 1.6 ≈ 1032 → 1.0K
   assert.match(text, /▣ ACP \| 1\.0K →/);
 });
+
+// afterTokens (and hence "reclaimed") must be measured on the SAME scale as
+// beforeTokens — the post-processTurn sent view, which carries every active
+// block's summary anchor plus ref-tag overhead. Regressing to the raw
+// projection (no summaries, no tags) would over-claim reclaimed by the
+// cumulative summary mass of all blocks, exactly in long sessions.
+test("compress afterTokens is measured on the same sent-view scale as beforeTokens (multi-block)", async () => {
+  const { api, handlers } = captureApi();
+  createAcpExtension({ modelContextLimit: 200_000 })(api as any);
+  const stateFile = "/tmp/pai-acp-compress-scales.session.json";
+  await rm(`${stateFile}.acp.json`, { force: true });
+  const entries = [userMsg("e1", "hello world"), userMsg("e2", ZH), userMsg("e3", ZH2), userMsg("e4", ZH2)];
+  const ctx = fakeCtx(entries, stateFile);
+  ctx.__setUsage(100_000);
+  await runContextRound(handlers, ctx); // density anchor at 1
+
+  const compressTool = api.tools.find((t: any) => t.name === "compress")!;
+  async function doCompress(callId: string, range: { startId: string; endId: string; summary: string }) {
+    const out = await compressTool.execute(callId, { content: [range] }, undefined, undefined, ctx);
+    return typeof out === "string" ? out : out.content?.[0]?.text ?? String(out);
+  }
+
+  await doCompress("tc1", { startId: "m00001", endId: "m00001", summary: "first block" });
+  const text = await doCompress("tc2", { startId: "m00003", endId: "m00003", summary: "second block" });
+
+  const m = /▣ ACP \| (\d+(?:\.\d+)?)(K?) → (\d+(?:\.\d+)?)(K?) tokens \(~(\d+(?:\.\d+)?)(K?) reclaimed/.exec(text);
+  assert.ok(m, `no ACP line in output: ${text}`);
+  const toTok = (n: string, k?: string) => (k === "K" ? Number(n) * 1000 : Number(n));
+  const before = toTok(m![1]!, m![2]);
+  const after = toTok(m![3]!, m![4]);
+  const reclaimed = toTok(m![5]!, m![6]);
+
+  // Visible-only (e2+e4) = 450. The true post-compression sent view adds the
+  // two summary anchors + tag overhead (~60) → afterTokens ≥ 480; a raw
+  // projection regression would report ~450.
+  assert.ok(after >= 480, `afterTokens ${after} missing the summary-anchor scale (raw projection would be ~450): ${text}`);
+  // True freed ≈ removed e3 (150) + tag delta − new summary (~170); a raw
+  // afterTokens would over-claim by block-1 summary + tags (~220).
+  assert.ok(reclaimed <= 180, `reclaimed ${reclaimed} over-claimed (raw afterTokens would be ~220): ${text}`);
+  assert.equal(before - after, reclaimed, "reclaimed consistent with the arrow");
+});

@@ -12,7 +12,8 @@ import { resolveConfig, type AdapterConfig } from "./config.js";
 import { DensityEstimator } from "./density.js";
 import { entriesToCoreMessages, extractText, matchesStoredText, messageIdentity, messageRef } from "./messages.js";
 import { SessionStateStore, type LiveRefOrigin } from "./state.js";
-import { logInfo, logWarn } from "./log.js";
+import { loadUserConfig, applyUserConfig } from "./user-config.js";
+import { logInfo, logWarn, setDebugEnabled } from "./log.js";
 import { findUniqueLongestRun, type MatchRange } from "./sequence-match.js";
 // pi exposes `sessionManager.buildContextEntries()`; omp (oh-my-pi) only has
 // `getBranch()`. Both return chronological SessionEntry[]; feature-detect so
@@ -51,7 +52,6 @@ export interface AcpRuntime {
   /** Drop per-session tracking state (session_start). */
   clearSessionTracking(sid: string): void;
   adapter: AdapterConfig;
-  setAdapter(adapter: AdapterConfig): void;
   prompts: Prompts;
   setPrompts(prompts: Prompts): void;
   markNudgeShown(turnKey: string): void;
@@ -59,6 +59,10 @@ export interface AcpRuntime {
   clearNudgeTracking(): void;
   liveContextLimit(ctx: ExtensionContext): number;
   configFor(ctx: ExtensionContext): Config;
+  /** Re-read ~/.<dir>/acp.json + <cwd>/<dir>/acp.json and re-derive the adapter
+   *  config when the contents change. Cheap no-op when unchanged. Called at
+   *  session_start and on every context event so config edits apply live. */
+  reloadConfig(cwd: string): Promise<void>;
   stateFor(ctx: ExtensionContext, liveMessages?: AgentMessage[]): Promise<{ state: CompressionState; coreMessages: ReturnType<typeof entriesToCoreMessages>; entries: SessionEntry[] }>;
   save(state: CompressionState, ctx: ExtensionContext): Promise<void>;
   acquireLock(sid: string): Promise<() => void>;
@@ -209,7 +213,9 @@ export function createRuntime(adapter: AdapterConfig): AcpRuntime {
   const store = new SessionStateStore();
   const lastActiveBlockIds = new Map<string, Set<string>>();
   const locks = new Map<string, Promise<void>>();
+  const factoryAdapter = adapter;
   let adapterRef = adapter;
+  let lastUserConfigKey: string | undefined;
   let promptsRef: Prompts = defaultPrompts;
   const nudgeShownTurns = new Set<string>();
 
@@ -232,6 +238,28 @@ export function createRuntime(adapter: AdapterConfig): AcpRuntime {
   function configFor(ctx: ExtensionContext): Config {
     const m = ctx.model as { provider?: string; id?: string } | undefined;
     return resolveConfig(adapterRef, liveContextLimit(ctx), m?.provider, m?.id);
+  }
+
+  async function reloadConfig(cwd: string): Promise<void> {
+    let user;
+    try {
+      user = await loadUserConfig(cwd);
+    } catch (e) {
+      logWarn("runtime", { event: "config-reload-failed", error: e instanceof Error ? e.message : String(e) });
+      return;
+    }
+    try {
+      const key = JSON.stringify(user);
+      if (key === lastUserConfigKey) return;
+      lastUserConfigKey = key;
+      // Re-derive from the factory config (not adapterRef) so a key REMOVED from
+      // acp.json actually reverts, instead of lingering from a prior apply.
+      adapterRef = applyUserConfig(factoryAdapter, user);
+      if (adapterRef.debug !== undefined) setDebugEnabled(adapterRef.debug);
+      logInfo("runtime", { event: "config-reloaded", limit: adapterRef.modelContextLimit ?? null });
+    } catch (e) {
+      logWarn("runtime", { event: "config-reload-failed", error: e instanceof Error ? e.message : String(e) });
+    }
   }
 
   async function stateFor(ctx: ExtensionContext, liveMessages?: AgentMessage[]) {
@@ -276,4 +304,4 @@ export function createRuntime(adapter: AdapterConfig): AcpRuntime {
     lastActiveBlockIds.delete(sid);
   }
 
-  return { core, store, density, setCountModel: (m) => { countModelId = m; }, noteActiveBlocks, clearSessionTracking, get adapter() { return adapterRef; }, setAdapter: (a) => { adapterRef = a; }, get prompts() { return promptsRef; }, setPrompts: (p) => { promptsRef = p; }, markNudgeShown: (k) => { nudgeShownTurns.add(k); }, nudgeShownFor: (k) => nudgeShownTurns.has(k), clearNudgeTracking: () => { nudgeShownTurns.clear(); }, liveContextLimit, configFor, stateFor, save, acquireLock };}
+  return { core, store, density, setCountModel: (m) => { countModelId = m; }, noteActiveBlocks, clearSessionTracking, get adapter() { return adapterRef; }, get prompts() { return promptsRef; }, setPrompts: (p) => { promptsRef = p; }, markNudgeShown: (k) => { nudgeShownTurns.add(k); }, nudgeShownFor: (k) => nudgeShownTurns.has(k), clearNudgeTracking: () => { nudgeShownTurns.clear(); }, liveContextLimit, configFor, reloadConfig, stateFor, save, acquireLock };}
