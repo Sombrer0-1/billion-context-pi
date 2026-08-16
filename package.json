@@ -1,6 +1,6 @@
 {
 	"name": "billion-context-pi",
-	"version": "0.1.31",
+	"version": "0.1.38",
 	"description": "One billion, not one million. Model-driven context management for the Pi coding agent.",
 	"main": "dist/index.js",
 	"types": "dist/index.d.ts",
@@ -38,7 +38,8 @@
 	"scripts": {
 		"test": "node --import tsx --test tests/*.test.ts",
 		"typecheck": "tsc --noEmit",
-		"build": "tsup && tsc --emitDeclarationOnly"
+		"build": "tsup && tsc --emitDeclarationOnly",
+		"e2e": "node scripts/e2e/run-e2e.mjs"
 	},
 	"keywords": [
 		"pi",
@@ -59,7 +60,8 @@
 	"devDependencies": {
 		"@earendil-works/pi-coding-agent": "0.83.0",
 		"@types/node": "^26.1.2",
-		"acp-kernel": "0.0.17",
+		"acp-kernel": "0.0.27",
+		"billion-context-kit": "0.2.0",
 		"tsup": "^8.5.1",
 		"tsx": "^4.23.1",
 		"typescript": "^7.0.2"

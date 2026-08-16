@@ -4,18 +4,19 @@ import type {
   ExtensionFactory,
   SessionMessageEntry,
 } from "@earendil-works/pi-coding-agent";
-import type { CoreMessage, NudgeDecision, CompressionBlock } from "acp-kernel";
-import { renderNudgeText } from "acp-kernel";
-import type { AdapterConfig } from "./config.js";
+import type { CoreMessage, NudgeDecision, CompressionBlock, Prompts } from "acp-kernel";
+import { renderNudgeText, resolvePrompts, defaultPrompts } from "acp-kernel";
+import { type AdapterConfig, resolveDelegate } from "./config.js";
 import { createRuntime, type AcpRuntime } from "./runtime.js";
 import { makeCompressTool } from "./compress-tool.js";
 import { makeDecompressTool } from "./decompress-tool.js";
 import { makeSearchTool } from "./search-tool.js";
 import { makeStatusTool } from "./status-tool.js";
-import { makeDelegateTool, makeDelegateWaitTool, makeDelegateCancelTool, runningRunsSnapshot } from "./delegate-tool.js";
+import { makeDelegateTool, makeDelegateWaitTool, makeDelegateCancelTool, runningRunsSnapshot, resetDelegateUsage, setDelegateDisplayUsage } from "./delegate-tool.js";
 import { makeCommands } from "./commands.js";
 import { coreOutToAgentMessages } from "./messages.js";
-import { ACP_SYSTEM_PROMPT, ACP_DELEGATE_PROMPT } from "./system-prompt.js";
+import { viableRanges } from "billion-context-kit";
+import { buildAcpSystemPrompt, ACP_DELEGATE_PROMPT } from "./system-prompt.js";
 import { delegateStatusWidget } from "./fleet-widget.js";
 import { wireToolGuardrails } from "./tool-guardrails.js";
 import { debug, setDebugEnabled, logError, logInfo, logWarn, logThrow, closeLogStream } from "./log.js";
@@ -23,7 +24,8 @@ import { collectCoveredMessageIds, estimateTokens, lastUserMessageId } from "./t
 import { checkForUpdate } from "./update.js";
 import { runSetupAndNotify } from "./setup-subagent-tools.js";
 import { loadUserConfig, applyUserConfig } from "./user-config.js";
-import { formatSystemPromptForEvent } from "./compat.js";
+import { defaultCountTokens } from "acp-kernel";
+import { formatSystemPromptForEvent, getSystemPromptText } from "./compat.js";
 
 type AgentMessage = SessionMessageEntry["message"];
 
@@ -66,19 +68,25 @@ function wireSessionLifecycle(pi: ExtensionAPI, runtime: AcpRuntime): void {
     // 新会话重置该模型的密度校准（文档 §5.3：模型/窗口切换时重新收敛）
     const modelId = (ctx.model as { id?: string } | undefined)?.id ?? "default";
     runtime.density.resetModel(modelId);
-    // Load user config (~/.pi/acp.json + project .pi/acp.json) and apply it so
-    // debug/terminalNudge/autoUpdate/modelContextLimit are runtime-configurable
-    // without env vars or reinstalling.
+    resetDelegateUsage();
+    setDelegateDisplayUsage("separate");
     const sid = ctx.sessionManager.getSessionId();
     logInfo("session", { event: "start", sid, cwd: ctx.cwd, debug: runtime.adapter.debug ?? null, version: typeof CURRENT_VERSION !== "undefined" ? CURRENT_VERSION : null });
     try {
       const user = await loadUserConfig(ctx.cwd);
       runtime.setAdapter(applyUserConfig(runtime.adapter, user));
+      setDelegateDisplayUsage(resolveDelegate(runtime.adapter).displayUsage);
       if (runtime.adapter.debug !== undefined) setDebugEnabled(runtime.adapter.debug);
     } catch (e) {
       logThrow("config", e, { sid, phase: "session_start" });
     }
-    if (runtime.adapter.delegate !== false) {
+    try {
+      runtime.setPrompts(resolvePrompts(runtime.adapter.prompts, { acknowledgeRisk: runtime.adapter.acknowledgePromptsRisk === true }));
+    } catch (e) {
+      logWarn("config", { event: "prompts-resolve-failed", error: e instanceof Error ? e.message : String(e) });
+      runtime.setPrompts(defaultPrompts);
+    }
+    if (resolveDelegate(runtime.adapter).enabled) {
       pi.registerTool(makeDelegateTool(pi));
       pi.registerTool(makeDelegateWaitTool(pi));
       pi.registerTool(makeDelegateCancelTool(pi));
@@ -116,14 +124,22 @@ function wireContextTransform(pi: ExtensionAPI, runtime: AcpRuntime): void {
       const { state, coreMessages, entries } = await runtime.stateFor(ctx, event.messages);
       const config = runtime.configFor(ctx);
       const coveredIds = collectCoveredMessageIds(state);
-      // Prefer pi's real token count (anchored on provider usage) over our
-      // chars/4 estimate — it includes the system prompt, tool schemas, and
-      // trailing messages pi has not yet received a usage for. This is what the
-      // footer percentage reflects, so nudge usage/growth will match what the
-      // user sees.
+      // Nudge arbitration on the SENT-VIEW scale: chars/4 estimate over the
+      // pruned projection + measured system prompt. pi's real usage is
+      // anchored on the last assistant's provider-reported usage when
+      // available — close to the sent view — but it falls back to summing
+      // the whole session tree (originals included, never shrinks) when the
+      // provider reports no usage. After compression (or after switching to
+      // a smaller-window model) that tree number can exceed the window many
+      // times over while the real sent view is a few percent — permanent
+      // false EMERGENCY nudges while the session keeps working (omp issue
+      // #18 report; same host lineage). The tree-scale number is logged for
+      // diagnostics only.
       const realUsage = ctx.getContextUsage?.();
-      const estimated = estimateTokens(coreMessages, coveredIds);
-      const tokenCount = realUsage?.tokens && realUsage.tokens > 0 ? realUsage.tokens : estimated;
+      const systemPromptText = getSystemPromptText(ctx);
+      const systemPromptTokens = systemPromptText ? defaultCountTokens(systemPromptText) : 0;
+      const sentTokens = estimateTokens(coreMessages, coveredIds) + systemPromptTokens;
+      const tokenCount = sentTokens;
 
       debug.event("context-in", {
         sid,
@@ -133,9 +149,7 @@ function wireContextTransform(pi: ExtensionAPI, runtime: AcpRuntime): void {
         entries: entries.length,
         coreMsgs: coreMessages.length,
         tokenCount,
-        estimatedTokens: estimated,
-        realTokens: realUsage?.tokens ?? null,
-        realPercent: realUsage?.percent ?? null,
+        sessionTokens: realUsage?.tokens ?? null,
         limit: config.modelContextLimit,
         blocksBefore: state.blocks.length,
         activeBefore: state.blocks.filter((b) => b.active).length,
@@ -143,12 +157,14 @@ function wireContextTransform(pi: ExtensionAPI, runtime: AcpRuntime): void {
 
       const turn = runtime.core.processTurn({ messages: coreMessages, state, config, tokenCount });
       await runtime.save(turn.state, ctx);
-      // 更新密度校准（Phase 2）：processTurn 后调用，countTokens 用上一轮 density（1 轮延迟可忽略）。
+      // 密度校准（Phase 2）：processTurn 后调用，countTokens 用上一轮 density（1 轮延迟可忽略）。
+      // real 侧 = provider 锚定 usage（缺失时锚点冻结，§5.9）；est 侧 = 发送视图估算
+      // （estimateTokens 内部走 CJK 感知 defaultCountTokens，与注入 kernel 的计数器同源）。
       // postCompression = 本次新增了 active block（模型刚压缩过）。
       const postCompression = turn.state.blocks.some(
         (b) => b.active && !state.blocks.some((o) => o.blockId === b.blockId)
       );
-      runtime.density.update(modelId, realUsage?.tokens ?? null, estimated, postCompression);
+      runtime.density.update(modelId, realUsage?.tokens ?? null, sentTokens, postCompression);
 
       logInfo("turn", {
         sid,
@@ -170,7 +186,7 @@ function wireContextTransform(pi: ExtensionAPI, runtime: AcpRuntime): void {
         prunedMsgs: coreMessages.length - turn.messages.length + turn.messages.filter((m) => m.id.startsWith("acp_summary")).length,
         nudgeShouldInject: turn.nudge?.shouldInject ?? false,
         nudgeReason: turn.nudge?.reason ?? null,
-        nudgeVoice: turn.nudge ? renderNudgeText(turn.nudge).voice : null,
+        nudgeVoice: turn.nudge ? renderNudgeText(turn.nudge, runtime.prompts).voice : null,
       nudgePct: turn.nudge ? Math.round(turn.nudge.contextUsage * 100) : null,
       nudgeTier: turn.nudge?.tier ?? null,
       nudgeCompressibleCount: turn.nudge?.compressibleRanges.length ?? 0,
@@ -199,11 +215,15 @@ function wireContextTransform(pi: ExtensionAPI, runtime: AcpRuntime): void {
       // reply (streaming/tool loop), and without this gate the same nudge
       // would be appended on every event.
       const emergency = turn.nudge.breakdown?.emergencyOverride === 1;
+      // Recommend only ranges the model can actually compress: a tiny
+      // fragmented range in the list makes batched attempts fail atomically
+      // (kernel validates the whole batch). See viableRanges in billion-context-kit.
+      turn.nudge.compressibleRanges = viableRanges(turn.nudge.compressibleRanges);
       const turnKey = lastUserMessageId(entries) ?? sid;
       const alreadyShown = !emergency && runtime.nudgeShownFor(turnKey);
       if (!alreadyShown) {
-        rebuilt.push(nudgeMessage(turn.nudge, turn.state.blocks.filter((b) => b.active)));
-        const rendered = renderNudgeText(turn.nudge);
+        rebuilt.push(nudgeMessage(turn.nudge, turn.state.blocks.filter((b) => b.active), runtime.prompts));
+        const rendered = renderNudgeText(turn.nudge, runtime.prompts);
         const top = [...turn.nudge.compressibleRanges].sort((a, b) => b.tokens - a.tokens)[0];
         const example = top ? `\n\nExample: compress({ content: [{ startId: "${top.startRef}", endId: "${top.endRef}", summary: "..." }] })` : "";
         if (emergency) {
@@ -242,7 +262,8 @@ function wireContextTransform(pi: ExtensionAPI, runtime: AcpRuntime): void {
 function wireSystemPrompt(pi: ExtensionAPI, runtime: AcpRuntime): void {
   pi.on("before_agent_start", (event) => {
     const delegate = runtime.adapter.delegate !== false;
-    const prompt = delegate ? `${ACP_SYSTEM_PROMPT}\n${ACP_DELEGATE_PROMPT}` : ACP_SYSTEM_PROMPT;
+    const acp = buildAcpSystemPrompt(runtime.prompts);
+    const prompt = delegate ? `${acp}\n${ACP_DELEGATE_PROMPT}` : acp;
     return { systemPrompt: formatSystemPromptForEvent(event.systemPrompt, prompt) };
   });
 }
@@ -265,8 +286,8 @@ function collectOriginals(entries: Array<{ type: string; id: string; message?: A
   return map;
 }
 
-function nudgeMessage(nudge: NudgeDecision, blocks: CompressionBlock[]): AgentMessage {
-  const rendered = renderNudgeText(nudge);
+function nudgeMessage(nudge: NudgeDecision, blocks: CompressionBlock[], prompts: Prompts): AgentMessage {
+  const rendered = renderNudgeText(nudge, prompts);
   const lines = [rendered.text];
 
   if (blocks.length > 0) {

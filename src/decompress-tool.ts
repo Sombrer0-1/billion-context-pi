@@ -2,10 +2,11 @@ import { Type, type Static } from "typebox";
 import type { AgentToolResult, ExtensionContext, ToolDefinition } from "@earendil-works/pi-coding-agent";
 import type { AcpRuntime } from "./runtime.js";
 import { debug, logError, logInfo, logThrow } from "./log.js";
-import { parseBlockIdArg, collectBlockContent } from "acp-kernel";
+import { parseBlockIdArg, collectBlockContent, type CompressionBlock } from "acp-kernel";
 import { entriesToCoreMessages } from "./messages.js";
 import { writeFile, mkdir } from "node:fs/promises";
-import { resolve, relative, isAbsolute, join } from "node:path";
+import { existsSync, lstatSync, readlinkSync, realpathSync } from "node:fs";
+import { resolve, relative, isAbsolute, join, basename, dirname } from "node:path";
 import { tmpdir, homedir } from "node:os";
 
 /** Directory for auto-generated decompress output files. */
@@ -69,14 +70,48 @@ function resolveToFilePath(targetPath: string): string | { error: string } {
     ? join(homedir(), targetPath.slice(2))
     : targetPath;
   const resolved = resolve(expanded);
-  const isAllowed = ALLOWED_DIRS.some((dir) => {
-    const rel = relative(dir, resolved);
+  // Resolve symlinks in the longest existing ancestor before the containment
+  // check — a symlinked dir inside an allowed root must not escape it.
+  let probe = resolved;
+  const suffix: string[] = [];
+  while (!existsSync(probe) && probe !== dirname(probe)) {
+    suffix.unshift(basename(probe));
+    probe = dirname(probe);
+  }
+  const real = existsSync(probe) ? realpathSync(probe) : probe;
+  // Re-resolve any dangling symlinks among the suffix components. existsSync
+  // follows links, so a symlink whose target does not (yet) exist is treated
+  // as non-existent and skipped by the walk above — but writing through it
+  // would land at the (possibly outside) target. Resolve via lstat/readlink.
+  let checked = real;
+  for (const part of suffix) {
+    checked = join(checked, part);
+    try {
+      if (lstatSync(checked).isSymbolicLink()) {
+        const target = readlinkSync(checked);
+        checked = isAbsolute(target) ? resolve(target) : resolve(dirname(checked), target);
+      }
+    } catch {
+      // not statable or not a symlink — keep the literal component
+    }
+  }
+  // Compare against realpath'd roots too: tmpdir() often sits behind a
+  // symlink (/var -> /private/var on macOS) and the string forms diverge.
+  const allowed = ALLOWED_DIRS.map((d) => {
+    try {
+      return realpathSync(d);
+    } catch {
+      return d; // root does not exist yet — keep the literal form
+    }
+  });
+  const isAllowed = allowed.some((dir) => {
+    const rel = relative(dir, checked);
     return rel === "" || (!rel.startsWith("..") && !isAbsolute(rel));
   });
   if (!isAllowed) {
     return { error: `Error: toFile path must be under ${tmpdir()}, ~/.cache/opencode, or ~/.cache/pi. Got: ${targetPath}` };
   }
-  return resolved;
+  return checked;
 }
 
 /** Generate a unique auto file path for a block. Uses a timestamp so repeated
@@ -106,6 +141,33 @@ function findMessageContent(ref: string, ctx: ExtensionContext): { text: string;
     }
   }
   return null;
+}
+
+/** Recover a block's message refs from the FULL session tree (getEntry), not
+ *  just the active branch, so block decompress still works after a tree
+ *  navigation (workspace-history /undo /redo, Pi /tree). Block refs are
+ *  CoreMessage ids — multi tool-call assistants are `${entryId}#${callId}`
+ *  (messages.ts projectMessage) — while getEntry() keys are SessionEntry ids
+ *  (no suffix), so both sides normalize to the base id before comparing.
+ *  Re-projecting a fetched entry re-splits multi tool-call assistants back
+ *  into `${entryId}#${callId}` CoreMessages, which match
+ *  block.effectiveMessageIds verbatim in collectBlockContent's targetIds set. */
+function resolveBlockMessages(
+  block: CompressionBlock,
+  coreMessages: ReturnType<typeof entriesToCoreMessages>,
+  ctx: ExtensionContext,
+): ReturnType<typeof entriesToCoreMessages> {
+  const neededBaseIds = new Set(block.effectiveMessageIds.map((id) => id.split("#")[0]!));
+  const presentBaseIds = new Set(coreMessages.map((m) => m.id.split("#")[0]!));
+  const missingBaseIds = [...neededBaseIds].filter((id) => !presentBaseIds.has(id));
+  if (missingBaseIds.length === 0) return coreMessages;
+
+  const extra: ReturnType<typeof entriesToCoreMessages> = [];
+  for (const baseId of missingBaseIds) {
+    const entry = ctx.sessionManager.getEntry(baseId);
+    if (entry) extra.push(...entriesToCoreMessages([entry]));
+  }
+  return [...coreMessages, ...extra];
 }
 
 /** Decompress a single message by its ref. Unlike block decompression (which
@@ -154,7 +216,7 @@ async function handleMessageRef(
 
 async function handleDecompress(args: DecompressArgs, runtime: AcpRuntime, ctx: ExtensionContext): Promise<string> {
   const { state, coreMessages } = await runtime.stateFor(ctx);
-  const arg = args.blockId.trim();
+  const arg = (args.blockId ?? "").trim();
 
   // Resolve what `arg` refers to. Check message-ref FIRST (data-driven: a ref
   // exists in some block's effectiveMessageIds). This must precede block-id
@@ -175,7 +237,11 @@ async function handleDecompress(args: DecompressArgs, runtime: AcpRuntime, ctx: 
   }
 
   const full = args.full ?? false;
-  const { text, count } = collectBlockContent(state, block, coreMessages, { full });
+  // Resolve the block's message refs against the FULL session tree (falling
+  // back to getEntry for refs missing from the active branch), so decompress
+  // still restores original text after a tree navigation (undo/redo//tree).
+  const resolved = resolveBlockMessages(block, coreMessages, ctx);
+  const { text, count } = collectBlockContent(state, block, resolved, { full });
 
   if (count === 0) return `Block ${blockId} has no restorable message content.`;
 

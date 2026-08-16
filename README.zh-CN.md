@@ -134,42 +134,9 @@ Blocks: 3 active (3.7K summary, 15.2K original compressed)
 
 ## 配置
 
-billion-context-pi 开箱即用,无需任何配置。可以在 JSON 配置文件中设置三个可选 key。
+billion-context-pi 开箱即用,无需任何配置——它会自动读取模型的上下文窗口并应用合理的默认值。
 
-### 配置文件
-
-创建 `~/.pi/acp.json`(全局)和/或 `<项目>/.pi/acp.json`(项目级,覆盖全局):
-
-```json
-{
-  "debug": false,
-  "autoUpdate": true,
-  "modelContextLimit": 200000,
-  "delegate": true,
-  "toolBashDefaultTimeout": 60,
-  "toolOutputMaxBytes": 200000
-}
-```
-
-| Key | 默认值 | 说明 |
-|-----|--------|------|
-| `debug` | `false` | 启用诊断日志(`error`/`warn`/`info` 始终写入 `~/.pi/acp.log`,此开关仅额外打开详细 `debug` 事件)。也可用环境变量 `ACP_DEBUG=1` 启用。 |
-| `autoUpdate` | `true` | Pi 启动时检查 npm 是否有更新版本并自动安装(限频:每 3 分钟最多一次检查)。禁用以避免所有启动时的网络请求。 |
-| `modelContextLimit` | *(自动)* | 覆盖上下文上限(token 数)。默认为模型的 `contextWindow`。 |
-| `delegate` | `true` | 启用 `acp_delegate` 工具(delegate/wait/cancel)及其系统提示词段落。设为 `false` 则不注册这些工具(例如你用了别的子代理扩展,或跑 headless 场景异步注入没有意义)。 |
-| `toolBashDefaultTimeout` | `60` | 当模型未指定 `timeout` 时注入 `bash` 工具的超时秒数。Pi **本身没有默认超时**,不加这个,一次遗漏的超时可能挂起几千秒。超时后会提示模型用更大的 `timeout` 重跑。设为 `0` 恢复 Pi 的无界行为。 |
-| `toolOutputMaxBytes` | `200000` | 工具结果文本硬上限(字节,约 5000 行 @ ~40 字节/行,通过 `tool_result` hook 应用)。用于兜住 Pi 自身 50KB/2000 行截断管不到的输出(例如 Pi 未加限制的工具)。触发截断时会告诉模型如何查看完整输出——对 `bash`,完整输出在其临时文件(`BashToolDetails.fullOutputPath`)中;设更小(如 `8192`)可更省上下文,设 `0` 关闭。 |
-
-> **只有这六个 key 会被 `acp.json` 读取。** 其他调优参数(`preserveRecentMessages`、`protectedTools`、nudge 阈值)是代码级的,不向用户开放。
-
-### 环境变量
-
-| 变量 | 作用 |
-|------|------|
-| `ACP_AUTO_UPDATE` | 设为 `0` / `false` / `no` / `off`(不区分大小写)以禁用自动更新,覆盖配置值。 |
-| `ACP_MODEL_CONTEXT_LIMIT` | 覆盖上下文上限。优先级高于配置值。 |
-| `ACP_DEBUG` | 设为 `1` 或 `true` 启用 debug 日志(`error`/`warn`/`info` 始终写入,无需此开关)。 |
-| `ACP_LOG_FILE` | 覆盖日志文件路径(默认 `~/.pi/acp.log`)。 |
+行为通过可选的 `acp.json` 配置文件(`~/.pi/acp.json` 为全局默认,`<项目>/.pi/acp.json` 为项目级覆盖)以及若干环境变量来调优。完整参考——每个 key、类型、默认值与优先级顺序——请查阅 **[CONFIGURATION.zh-CN.md](./CONFIGURATION.zh-CN.md)** ([English](./CONFIGURATION.md))。
 
 ### 日志
 

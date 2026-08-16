@@ -1,18 +1,22 @@
 import type { ExtensionContext, SessionEntry, SessionMessageEntry } from "@earendil-works/pi-coding-agent";
 import {
   createCore,
+  defaultCountTokens,
+  defaultPrompts,
   type CompressionCore,
   type CompressionState,
   type Config,
+  type Prompts,
 } from "acp-kernel";
 import { resolveConfig, type AdapterConfig } from "./config.js";
 import { DensityEstimator } from "./density.js";
-import { entriesToCoreMessages } from "./messages.js";
-import { SessionStateStore } from "./state.js";
+import { entriesToCoreMessages, extractText, matchesStoredText, messageIdentity, messageRef } from "./messages.js";
+import { SessionStateStore, type LiveRefOrigin } from "./state.js";
 import { logInfo, logWarn } from "./log.js";
+import { findUniqueLongestRun, type MatchRange } from "./sequence-match.js";
 // pi exposes `sessionManager.buildContextEntries()`; omp (oh-my-pi) only has
-// `getBranch()`. Both return chronological SessionEntry[]; feature-detect so the
-// adapter runs under either host (omp's runner silently swallows the TypeError).
+// `getBranch()`. Both return chronological SessionEntry[]; feature-detect so
+// the adapter runs under either host (omp's runner silently swallows the TypeError).
 type SessionEntrySource = {
   buildContextEntries?: () => SessionEntry[];
   getBranch?: () => SessionEntry[];
@@ -27,9 +31,6 @@ export function readContextEntries(sm: ExtensionContext["sessionManager"]): Sess
   return [];
 }
 
-// True only on pi: `--mode json` event streaming (used by async delegates) is a
-// pi feature. omp (oh-my-pi) has no json mode, so delegates must fall back to
-// `-p` there — same detection as readContextEntries above.
 export function isPiHost(sm: ExtensionContext["sessionManager"]): boolean {
   const source = sm as unknown as SessionEntrySource;
   return typeof source.buildContextEntries === "function";
@@ -43,13 +44,10 @@ export interface AcpRuntime {
   setCountModel(modelId: string): void;
   adapter: AdapterConfig;
   setAdapter(adapter: AdapterConfig): void;
-  /** Record that a nudge was already shown for the turn keyed by last user msg
-   *  id, so a tier/growth nudge prints at most once per turn instead of on
-   *  every context event (pi fires multiple per assistant reply). */
+  prompts: Prompts;
+  setPrompts(prompts: Prompts): void;
   markNudgeShown(turnKey: string): void;
   nudgeShownFor(turnKey: string): boolean;
-  /** Clear per-turn nudge tracking. Called on session_start so the Set does not
-   *  grow unbounded across sessions in a long-lived Pi process. */
   clearNudgeTracking(): void;
   liveContextLimit(ctx: ExtensionContext): number;
   configFor(ctx: ExtensionContext): Config;
@@ -58,56 +56,139 @@ export interface AcpRuntime {
   acquireLock(sid: string): Promise<() => void>;
 }
 // omp fires the context event before the current user message is persisted to
-// the session branch (its agent-loop emits message_end only after
-// prepareProviderCall → transformContext), so getBranch() lags one message
-// behind. Merge event.messages — the exact messages about to be sent,
-// including the not-yet-persisted tail — with the persisted branch records:
-// matching messages keep their stable entry id (so kernel refs survive once
-// the message is persisted on the next turn), unmatched tail messages get
-// `live-N` ids until they are persisted.
-function mergeLiveEntries(entries: SessionEntry[], live: AgentMessage[]): SessionEntry[] {
+// the session branch, so merge event.messages (exact messages about to be sent,
+// including the not-yet-persisted tail) with the persisted branch: matching
+// messages keep their stable entry id, unmatched tail messages get `live-N`
+// ids until persisted.
+function mergeLiveEntries(entries: SessionEntry[], live: AgentMessage[], state: CompressionState, origins: LiveRefOrigin[]): SessionEntry[] {
   const persisted = entries.filter((e): e is SessionMessageEntry => e.type === "message");
+  const liveIdentities = live.map(messageIdentity);
+  const persistedIdentities = persisted.map((entry) => messageIdentity(entry.message));
+  const persistedRange = findUniqueLongestRun<MatchKey>(persistedIdentities, normalizePersistedMatchKeys(persisted, persistedIdentities, live, liveIdentities));
+  const originRange = findUniqueLongestRun(origins.map((origin) => origin.identity), liveIdentities);
   const out: SessionEntry[] = [];
-  let p = 0;
-  let unmatched = 0;
+  const nextOrigins: LiveRefOrigin[] = [];
+  const usedIds = new Set<string>();
   for (let i = 0; i < live.length; i++) {
     const msg = live[i]!;
-    let matched: SessionMessageEntry | undefined;
-    let j = p;
-    while (j < persisted.length && persisted[j]!.message.role !== msg.role) j++;
-    if (j < persisted.length && sameMessage(persisted[j]!.message, msg)) {
-      matched = persisted[j]!;
-      p = j + 1;
+    const entry = valueInRange(persisted, persistedRange, i);
+    const origin = valueInRange(origins, originRange, i);
+    if (entry) {
+      if (origin) migrateLiveRefs(state, origin.rawId, entry.id);
+      else migrateTaggedRef(state, msg, entry.id);
+      out.push(entry);
+      continue;
     }
-    if (matched) {
-      out.push(matched);
-    } else {
-      unmatched++;
-      out.push({
-        type: "message",
-        id: `live-${i}`,
-        parentId: null,
-        timestamp: String(msg.timestamp ?? Date.now()),
-        message: msg,
-      });
-    }
+    const id = origin?.rawId ?? nextLiveId(state, usedIds, i);
+    usedIds.add(id);
+    out.push({ type: "message", id, parentId: null, timestamp: String(msg.timestamp ?? Date.now()), message: msg });
+    nextOrigins.push({ rawId: id, identity: liveIdentities[i]! });
   }
+  origins.splice(0, origins.length, ...nextOrigins);
+  const unmatched = live.length - (persistedRange?.length ?? 0);
   if (unmatched > 0) logInfo("runtime", { event: "merge-live-entries", live: live.length, unmatched });
   return out;
 }
 
-function sameMessage(a: AgentMessage, b: AgentMessage): boolean {
-  const ra = (a as { role?: string }).role;
-  const rb = (b as { role?: string }).role;
-  if (ra !== rb) return false;
-  const ca = (a as { content?: unknown }).content;
-  const cb = (b as { content?: unknown }).content;
-  if (ca === undefined || cb === undefined) return false;
+
+function nextLiveId(state: CompressionState, used: Set<string>, index: number): string {
+  let id = `live-${index}`;
+  let suffix = index;
+  while (used.has(id) || state.messageRefs.byRaw[id] !== undefined) id = `live-${++suffix}`;
+  return id;
+}
+
+function migrateTaggedRef(state: CompressionState, message: AgentMessage, stableId: string): void {
+  const ref = messageRef(message);
+  const rawId = ref ? state.messageRefs.byRef[ref] : undefined;
+  if (rawId?.startsWith("live-")) migrateLiveRefs(state, rawId, stableId);
+}
+
+function migrateLiveRefs(state: CompressionState, liveId: string, stableId: string): void {
+  const rootId = liveId.split("#", 1)[0]!;
+  if (!rootId.startsWith("live-")) return;
+  for (const [rawId, ref] of Object.entries(state.messageRefs.byRaw)) {
+    if (rawId !== rootId && !rawId.startsWith(`${rootId}#`)) continue;
+    const stableRawId = `${stableId}${rawId.slice(rootId.length)}`;
+    if (state.messageRefs.byRaw[stableRawId] === undefined) {
+      state.messageRefs.byRaw[stableRawId] = ref;
+      state.messageRefs.byRef[ref] = stableRawId;
+    } else if (state.messageRefs.byRef[ref] === rawId) {
+      delete state.messageRefs.byRef[ref];
+    }
+    delete state.messageRefs.byRaw[rawId];
+  }
+}
+
+type MatchKey = string | symbol;
+
+const NO_PERSISTED_MATCH = Symbol("no-persisted-match");
+
+function normalizePersistedMatchKeys(
+  persisted: readonly SessionMessageEntry[],
+  persistedIdentities: readonly string[],
+  live: readonly AgentMessage[],
+  liveIdentities: readonly string[],
+): MatchKey[] {
+  const persistedByStructure = new Map<string, number>();
+  for (let index = 0; index < persisted.length; index++) {
+    const key = toolResultStructureKey(persisted[index]!.message);
+    if (key === undefined) continue;
+    persistedByStructure.set(key, persistedByStructure.has(key) ? -1 : index);
+  }
+  return live.map((message, liveIndex) => {
+    const key = toolResultStructureKey(message);
+    const candidateIndex = key === undefined ? undefined : persistedByStructure.get(key);
+    if (candidateIndex === undefined) return liveIdentities[liveIndex]!;
+    if (candidateIndex < 0) return NO_PERSISTED_MATCH;
+    return sameToolResult(persisted[candidateIndex]!.message, message)
+      ? persistedIdentities[candidateIndex]!
+      : liveIdentities[liveIndex]!;
+  });
+}
+
+function toolResultStructureKey(message: AgentMessage): string | undefined {
+  if (message.role !== "toolResult") return undefined;
+  return `${message.toolName}\0${message.toolCallId}`;
+}
+
+function valueInRange<T>(values: readonly T[], range: MatchRange | undefined, liveIndex: number): T | undefined {
+  if (!range || liveIndex < range.liveStart || liveIndex >= range.liveStart + range.length) return undefined;
+  return values[range.candidateStart + liveIndex - range.liveStart];
+}
+
+function sameToolResult(stored: AgentMessage, visible: AgentMessage): boolean {
+  if (stored.role !== "toolResult" || visible.role !== "toolResult") return false;
+  return sameNonTextBlocks(stored.content, visible.content)
+    && matchesStoredText(extractText(stored.content), extractText(visible.content));
+}
+
+function sameNonTextBlocks(a: unknown, b: unknown): boolean {
+  const nonText = (blocks: unknown[]): unknown[] => blocks.filter((block) => {
+    if (!block || typeof block !== "object" || !("type" in block)) return true;
+    return block.type !== "text";
+  });
   try {
-    return JSON.stringify(ca) === JSON.stringify(cb);
-  } catch (e) {
-    logWarn("runtime", { event: "message-compare-failed", error: e instanceof Error ? e.message : String(e) });
-    return a === b;
+    const na = Array.isArray(a) ? nonText(a) : [];
+    const nb = Array.isArray(b) ? nonText(b) : [];
+    return JSON.stringify(na) === JSON.stringify(nb);
+  } catch {
+    return false;
+  }
+}
+
+function pruneOrphanRefs(state: CompressionState, messages: ReturnType<typeof entriesToCoreMessages>): void {
+  const retainedRawIds = new Set(messages.map((message) => message.id));
+  for (const block of state.blocks) {
+    for (const rawId of [...block.directMessageIds, ...block.effectiveMessageIds]) retainedRawIds.add(rawId);
+  }
+  for (const [rawId, ref] of Object.entries(state.messageRefs.byRaw)) {
+    if (retainedRawIds.has(rawId)) continue;
+    delete state.messageRefs.byRaw[rawId];
+    if (state.messageRefs.byRef[ref] === rawId) delete state.messageRefs.byRef[ref];
+  }
+  for (const [ref, rawId] of Object.entries(state.messageRefs.byRef)) {
+    if (!retainedRawIds.has(rawId)) delete state.messageRefs.byRef[ref];
   }
 }
 export function createRuntime(adapter: AdapterConfig): AcpRuntime {
@@ -120,25 +201,19 @@ export function createRuntime(adapter: AdapterConfig): AcpRuntime {
   const store = new SessionStateStore();
   const locks = new Map<string, Promise<void>>();
   let adapterRef = adapter;
+  let promptsRef: Prompts = defaultPrompts;
   const nudgeShownTurns = new Set<string>();
 
   async function acquireLock(sid: string): Promise<() => void> {
     const prev = locks.get(sid) ?? Promise.resolve();
     let release!: () => void;
-    const next = new Promise<void>((resolve) => {
-      release = () => {
-        locks.delete(sid);
-        resolve();
-      };
-    });
+    const next = new Promise<void>((resolve) => { release = () => { locks.delete(sid); resolve(); }; });
     locks.set(sid, prev.then(() => next));
     await prev;
     return release;
   }
 
   function liveContextLimit(ctx: ExtensionContext): number {
-    // Prefer pi's reported context window (matches what the footer shows) over
-    // ctx.model.contextWindow, which can be stale or unset for some providers.
     const usage = ctx.getContextUsage?.();
     if (usage?.contextWindow && usage.contextWindow > 0) return usage.contextWindow;
     const m = ctx.model as { contextWindow?: number } | undefined;
@@ -146,12 +221,15 @@ export function createRuntime(adapter: AdapterConfig): AcpRuntime {
   }
 
   function configFor(ctx: ExtensionContext): Config {
-    return resolveConfig(adapterRef, liveContextLimit(ctx));
+    const m = ctx.model as { provider?: string; id?: string } | undefined;
+    return resolveConfig(adapterRef, liveContextLimit(ctx), m?.provider, m?.id);
   }
 
   async function stateFor(ctx: ExtensionContext, liveMessages?: AgentMessage[]) {
     const sm = ctx.sessionManager;
-    const state = await store.load(sm.getSessionFile() ?? undefined, sm.getSessionId());
+    const sessionFile = sm.getSessionFile() ?? undefined;
+    const sessionId = sm.getSessionId();
+    const state = await store.load(sessionFile, sessionId);
     const entries = readContextEntries(sm);
     // omp fires the context event BEFORE the current user message is persisted
     // to the session branch (its agent-loop emits message_end only after
@@ -161,8 +239,16 @@ export function createRuntime(adapter: AdapterConfig): AcpRuntime {
     // buildContextEntries() is always current. Merge event.messages (the exact
     // messages about to be sent, including the not-yet-persisted tail) with the
     // persisted branch records on the omp path only.
-    const merged = isPiHost(sm) || !liveMessages || liveMessages.length === 0 ? entries : mergeLiveEntries(entries, liveMessages);
-    return { state, coreMessages: entriesToCoreMessages(merged), entries: merged };
+    if (!isPiHost(sm) && liveMessages && liveMessages.length > 0) {
+      const origins = store.getLiveRefOrigins(sessionFile, sessionId);
+      const merged = mergeLiveEntries(entries, liveMessages, state, origins);
+      store.setLiveRefOrigins(sessionFile, sessionId, origins);
+      const coreMessages = entriesToCoreMessages(merged);
+      return { state, coreMessages, entries: merged };
+    }
+    const coreMessages = entriesToCoreMessages(entries);
+    if (liveMessages === undefined) pruneOrphanRefs(state, coreMessages);
+    return { state, coreMessages, entries };
   }
 
   async function save(state: CompressionState, ctx: ExtensionContext) {
@@ -170,5 +256,4 @@ export function createRuntime(adapter: AdapterConfig): AcpRuntime {
     await store.save(state, sm.getSessionFile() ?? undefined, sm.getSessionId());
   }
 
-  return { core, store, density, setCountModel: (m) => { countModelId = m; }, get adapter() { return adapterRef; }, setAdapter: (a) => { adapterRef = a; }, markNudgeShown: (k) => { nudgeShownTurns.add(k); }, nudgeShownFor: (k) => nudgeShownTurns.has(k), clearNudgeTracking: () => { nudgeShownTurns.clear(); }, liveContextLimit, configFor, stateFor, save, acquireLock };
-}
+  return { core, store, density, setCountModel: (m) => { countModelId = m; }, get adapter() { return adapterRef; }, setAdapter: (a) => { adapterRef = a; }, get prompts() { return promptsRef; }, setPrompts: (p) => { promptsRef = p; }, markNudgeShown: (k) => { nudgeShownTurns.add(k); }, nudgeShownFor: (k) => nudgeShownTurns.has(k), clearNudgeTracking: () => { nudgeShownTurns.clear(); }, liveContextLimit, configFor, stateFor, save, acquireLock };}

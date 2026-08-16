@@ -7,6 +7,8 @@ import type {
 import type { AcpRuntime } from "./runtime.js";
 import { debug, logError, logInfo, logThrow } from "./log.js";
 import { estimateTokens, collectCoveredMessageIds } from "./tokens.js";
+import { defaultCountTokens } from "acp-kernel";
+import { getSystemPromptText } from "./compat.js";
 
 function formatK(n: number): string {
   return n >= 1000 ? `${(n / 1000).toFixed(1)}K` : String(n);
@@ -57,14 +59,27 @@ export function makeCompressTool(runtime: AcpRuntime): ToolDefinition<typeof Com
 async function handleCompress(args: CompressArgs, runtime: AcpRuntime, ctx: ExtensionContext, toolCallId?: string): Promise<string> {
   const ranges = args.content ?? [];
   if (ranges.length === 0) return "No ranges provided.";
-  const { state, coreMessages } = await runtime.stateFor(ctx);
+  const { state: initialState, coreMessages } = await runtime.stateFor(ctx);
   const config = runtime.configFor(ctx);
-  // 显示层对齐（文档 §3.3）：beforeTokens 走密度校准口径，与 kernel 的
-  // countTokens（已乘 density）同口径，模型看到的数字接近真实占用。
+  // Sent-view arbitration — the same scale as the context transform and
+  // acp_status (see src/index.ts): never the session-tree tokenCount.
+  const systemPromptText = getSystemPromptText(ctx);
+  const systemPromptTokens = systemPromptText ? defaultCountTokens(systemPromptText) : 0;
+  const sentTokens = estimateTokens(coreMessages, collectCoveredMessageIds(initialState)) + systemPromptTokens;
+  const turn = runtime.core.processTurn({
+    messages: coreMessages,
+    state: initialState,
+    config,
+    tokenCount: sentTokens,
+  });
+  const state = turn.state;
+  const messages = turn.messages;
+  // Display-layer density alignment (doc §3.3): beforeTokens is calibrated to
+  // the same scale as the kernel's injected countTokens (which already carries
+  // density), so the numbers the model sees match real usage.
   const modelId = (ctx.model as { id?: string } | undefined)?.id ?? "default";
   const density = runtime.density.densityFor(modelId);
-  const beforeTokens = Math.round(estimateTokens(coreMessages, collectCoveredMessageIds(state)) * density);
-  const summaryMaxChars = args.summaryMaxChars;
+  const beforeTokens = Math.round(estimateTokens(messages, collectCoveredMessageIds(state)) * density);  const summaryMaxChars = args.summaryMaxChars;
   const topLevelTopic = args.topic;
 
   debug.event("compress-in", {
@@ -75,12 +90,12 @@ async function handleCompress(args: CompressArgs, runtime: AcpRuntime, ctx: Exte
     spans: ranges.map((r) => ({ span: `${r.startId}..${r.endId}`, summaryLen: r.summary.length, summary: r.summary, topic: r.topic ?? topLevelTopic ?? null })),
     blocksBefore: state.blocks.length,
     activeBefore: state.blocks.filter((b) => b.active).length,
-    beforeMsgCount: coreMessages.length,
+    beforeMsgCount: messages.length,
     beforeTokens,
   });
   const applied = runtime.core.applyCompression({
     ranges: ranges.map((r) => ({ startRef: r.startId, endRef: r.endId, summary: r.summary, topic: r.topic ?? topLevelTopic, summaryMaxChars, compressCallId: toolCallId })),
-    messages: coreMessages,
+    messages,
     state,
     config,
   });
