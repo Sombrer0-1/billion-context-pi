@@ -5,7 +5,7 @@ import type {
   ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
 import type { AcpRuntime } from "./runtime.js";
-import { debug, logError, logInfo, logThrow } from "./log.js";
+import { debug, logError, logInfo, logThrow, logWarn } from "./log.js";
 import { estimateTokens, collectCoveredMessageIds, calibrateTokens } from "./tokens.js";
 import { defaultCountTokens } from "acp-kernel";
 import { getSystemPromptText } from "./compat.js";
@@ -103,7 +103,18 @@ async function handleCompress(args: CompressArgs, runtime: AcpRuntime, ctx: Exte
   await runtime.save(applied.state, ctx);
   const { blocksCreated, tokensCompressed, errors, warnings } = applied.result;
 
-  const afterTokens = Math.max(0, beforeTokens - tokensCompressed);
+  // Re-measure the post-compression sent view on the SAME scale as beforeTokens
+  // (post-processTurn view: visible text + every active block's summary anchor
+  // + ref-tag overhead), so "X → Y (~Z reclaimed)" compares like-for-like —
+  // including the new block's own summary, which the model will pay for next.
+  const afterTurn = runtime.core.processTurn({
+    messages: coreMessages,
+    state: applied.state,
+    config,
+    tokenCount: calibrateTokens(sentTokens, density),
+  });
+  const afterTokens = calibrateTokens(estimateTokens(afterTurn.messages, collectCoveredMessageIds(applied.state)), density);
+  const reclaimed = Math.max(0, beforeTokens - afterTokens);
 
   const newBlocks = applied.state.blocks.slice(-blocksCreated);
   debug.event("compress-out", {
@@ -136,10 +147,10 @@ async function handleCompress(args: CompressArgs, runtime: AcpRuntime, ctx: Exte
     logError("compress", { sid: ctx.sessionManager.getSessionId(), event: "errors", count: errors.length, errors: errors.slice(0, 5) });
   }
   if (warnings.length > 0) {
-    logError("compress", { sid: ctx.sessionManager.getSessionId(), event: "warnings", count: warnings.length, warnings: warnings.slice(0, 5) });
+    logWarn("compress", { sid: ctx.sessionManager.getSessionId(), event: "warnings", count: warnings.length, warnings: warnings.slice(0, 5) });
   }
 
-  const lines = [`▣ ACP | ${formatK(beforeTokens)} → ${formatK(afterTokens)} tokens (~${formatK(tokensCompressed)} reclaimed, ${blocksCreated} block${blocksCreated > 1 ? "s" : ""})`];
+  const lines = [`▣ ACP | ${formatK(beforeTokens)} → ${formatK(afterTokens)} tokens (~${formatK(reclaimed)} reclaimed, ${blocksCreated} block${blocksCreated > 1 ? "s" : ""})`];
   if (warnings.length > 0) lines.push("⚠️ " + warnings.join("; "));
   if (errors.length > 0) lines.push("Errors: " + errors.join("; "));
   return lines.join("\n");

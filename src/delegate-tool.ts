@@ -314,6 +314,16 @@ export function makeEventApplier(
 const WAIT_TIMEOUT_MS_DEFAULT = 10_000;
 const WAIT_TIMEOUT_MS_MAX = 300_000;
 
+/** Resolve a wait timeout to ms. Agents frequently pass seconds (e.g. 180)
+ *  instead of milliseconds; values below the 1s floor make no sense as a wait
+ *  duration, so rescale them to seconds before clamping — otherwise 180 clamps
+ *  to 1000ms and the wait times out in 1s. */
+export function resolveWaitTimeoutMs(raw: number | undefined): number {
+  if (raw === undefined) return WAIT_TIMEOUT_MS_DEFAULT;
+  const ms = raw < 1_000 ? raw * 1_000 : raw;
+  return Math.min(Math.max(ms, 1_000), WAIT_TIMEOUT_MS_MAX);
+}
+
 const DelegateParams = Type.Object({
   agent: Type.String({
     description: `Role of the delegate. One of: ${AGENT_NAMES.join(", ")}. See tool description for what each does.`,
@@ -349,7 +359,7 @@ const WaitParams = Type.Object({
   runId: Type.String({ description: "The runId returned by acp_delegate to wait for." }),
   timeout: Type.Optional(
     Type.Integer({
-      description: `Maximum milliseconds to block waiting for the result. Default ${WAIT_TIMEOUT_MS_DEFAULT} (10s); max ${WAIT_TIMEOUT_MS_MAX} (300s). If the delegate does not finish in time, returns "failed (not ready)" — do NOT keep waiting or retry; go do other work, and a completion notification will still be injected when it completes.`,
+      description: `Maximum time to block waiting for the result, in milliseconds. Default ${WAIT_TIMEOUT_MS_DEFAULT} (10s); max ${WAIT_TIMEOUT_MS_MAX} (300s). Values below 1000 are treated as seconds (so 180 means 180s, not 180ms). If the delegate does not finish in time, returns "failed (not ready)" — do NOT keep waiting or retry; go do other work, and a completion notification will still be injected when it completes.`,
     }),
   ),
 });
@@ -557,10 +567,7 @@ export function makeDelegateWaitTool(_pi: ExtensionAPI): ToolDefinition<typeof W
         }
         return buildWaitResult(run, formatRunResult(run), displayMode);
       }
-      const timeoutMs = Math.min(
-        Math.max(args.timeout ?? WAIT_TIMEOUT_MS_DEFAULT, 1_000),
-        WAIT_TIMEOUT_MS_MAX,
-      );
+      const timeoutMs = resolveWaitTimeoutMs(args.timeout);
       // Refuse to park a second waiter on the same run: a second wait would
       // overwrite run.waiter and orphan the first wait's listener/timer.
       if (run.waiter) {

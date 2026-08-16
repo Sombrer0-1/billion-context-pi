@@ -19,11 +19,10 @@ import { viableRanges } from "billion-context-kit";
 import { buildAcpSystemPrompt, ACP_DELEGATE_PROMPT } from "./system-prompt.js";
 import { delegateStatusWidget } from "./fleet-widget.js";
 import { wireToolGuardrails } from "./tool-guardrails.js";
-import { debug, setDebugEnabled, logError, logInfo, logWarn, logThrow, closeLogStream } from "./log.js";
+import { debug, logError, logInfo, logWarn, logThrow, closeLogStream } from "./log.js";
 import { collectCoveredMessageIds, estimateTokens, lastUserMessageId, calibrateTokens } from "./tokens.js";
 import { checkForUpdate } from "./update.js";
 import { runSetupAndNotify } from "./setup-subagent-tools.js";
-import { loadUserConfig, applyUserConfig } from "./user-config.js";
 import { defaultCountTokens } from "acp-kernel";
 import { formatSystemPromptForEvent, getSystemPromptText } from "./compat.js";
 
@@ -79,10 +78,8 @@ function wireSessionLifecycle(pi: ExtensionAPI, runtime: AcpRuntime): void {
     const modelInfo = ctx.model as { id?: string; contextWindow?: number; api?: string } | undefined;
     logInfo("session", { event: "start", sid, cwd: ctx.cwd, debug: runtime.adapter.debug ?? null, version: typeof CURRENT_VERSION !== "undefined" ? CURRENT_VERSION : null, model: modelInfo?.id ?? null, modelApi: modelInfo?.api ?? null, contextWindow: modelInfo?.contextWindow ?? null });
     try {
-      const user = await loadUserConfig(ctx.cwd);
-      runtime.setAdapter(applyUserConfig(runtime.adapter, user));
+      await runtime.reloadConfig(ctx.cwd);
       setDelegateDisplayUsage(resolveDelegate(runtime.adapter).displayUsage);
-      if (runtime.adapter.debug !== undefined) setDebugEnabled(runtime.adapter.debug);
     } catch (e) {
       logThrow("config", e, { sid, phase: "session_start" });
     }
@@ -124,6 +121,7 @@ function wireContextTransform(pi: ExtensionAPI, runtime: AcpRuntime): void {
     const sid = ctx.sessionManager.getSessionId();
     const release = await runtime.acquireLock(sid);
     try {
+      await runtime.reloadConfig(ctx.cwd);
       // 每轮绑定 countTokens 使用的模型（密度校准按 model 隔离）
       const modelId = (ctx.model as { id?: string } | undefined)?.id ?? "default";
       runtime.setCountModel(modelId);

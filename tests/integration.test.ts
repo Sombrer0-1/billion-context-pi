@@ -714,3 +714,47 @@ test("delegate:false omits the ACP_DELEGATE NOTIFICATIONS section from the syste
   // Core ACP prompt is still present — only the delegate section is dropped.
   assert.ok(result.systemPrompt.includes("ACP TAGS"), "core ACP prompt still present when delegate disabled");
 });
+
+// ─── ISSUE-9: modelContextLimit changes in <cwd>/.pi/acp.json hot-reload ──
+
+test("modelContextLimit changes in .pi/acp.json are picked up on the next context event", async () => {
+  (globalThis as Record<string, unknown>).CURRENT_VERSION ??= "0.0.0-test";
+  const { mkdtempSync, writeFileSync, rmSync, mkdirSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const { formatCompactTokens } = await import("billion-context-kit");
+
+  const tmp = mkdtempSync(join(tmpdir(), "acp-hotreload-"));
+  const piDir = join(tmp, ".pi");
+  mkdirSync(piDir, { recursive: true });
+  const acpJson = join(piDir, "acp.json");
+  writeFileSync(acpJson, JSON.stringify({ modelContextLimit: 100_000 }));
+
+  try {
+    const { api, handlers } = captureApi();
+    createAcpExtension()(api as any);
+
+    function ctxWithCwd() {
+      return { ...fakeCtx([], join(tmp, "state.json")), cwd: tmp };
+    }
+    async function acpStatus(): Promise<string> {
+      let captured = "";
+      const ctx = {
+        ...fakeCtx([], join(tmp, "state.json")),
+        cwd: tmp,
+        ui: { notify: (s: string) => { captured = s; }, confirm: async () => true, select: async () => undefined, input: async () => "", setStatus: () => {} },
+      };
+      await api.commands.get("acp").handler([], ctx);
+      return captured;
+    }
+
+    await handlers.get("context")![0]!({ type: "context", messages: [] }, ctxWithCwd());
+    assert.ok((await acpStatus()).includes(formatCompactTokens(100_000)), "initial limit reflects acp.json modelContextLimit=100000");
+
+    writeFileSync(acpJson, JSON.stringify({ modelContextLimit: 250_000 }));
+    await handlers.get("context")![0]!({ type: "context", messages: [] }, ctxWithCwd());
+    assert.ok((await acpStatus()).includes(formatCompactTokens(250_000)), "rewritten modelContextLimit=250000 hot-reloaded on next context event");
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
