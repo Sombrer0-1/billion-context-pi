@@ -68,8 +68,10 @@ export function makeCompressTool(runtime: AcpRuntime): ToolDefinition<typeof Com
 type RangeEntry = Static<typeof RangeSpec>;
 
 // Normalize the content argument: array passes through; a JSON-encoded string
-// (non-strict-tool providers) is parsed. Returns an error string on bad input
-// so the retry nudge (src/index.ts) can quote it back to the model.
+// (non-strict-tool providers) is parsed. Returns an error string on bad input —
+// handleCompress THROWS it so pi marks the toolResult isError:true and the
+// retry nudge (src/index.ts) can quote it back (returning it normally would
+// produce isError:false, which both skips the nudge and resets the counter).
 function normalizeRanges(content: CompressArgs["content"]): RangeEntry[] | string {
   let ranges: unknown = content ?? [];
   if (typeof ranges === "string") {
@@ -91,9 +93,21 @@ function normalizeRanges(content: CompressArgs["content"]): RangeEntry[] | strin
   return ranges as RangeEntry[];
 }
 
+/** True when a (non-error) compress toolResult text represents a completed
+ *  compression run — the "▣ ACP | …" panel. Other non-error strings ("No
+ *  ranges provided.", semantic "Errors: …" panels with nothing reclaimed)
+ *  are neutral outcomes that neither reset nor advance the retry counter
+ *  (see noteCompressOutcomes in runtime.ts). */
+export function isCompressSuccessText(text: string): boolean {
+  return text.trimStart().startsWith("▣ ACP |");
+}
+
 async function handleCompress(args: CompressArgs, runtime: AcpRuntime, ctx: ExtensionContext, toolCallId?: string): Promise<string> {
   const maybeRanges = normalizeRanges(args.content);
-  if (typeof maybeRanges === "string") return maybeRanges;
+  // Argument errors throw (not return): pi-agent-core only sets isError:true
+  // on THROWN tool errors, and the retry nudge keys off isError. A returned
+  // string would land as isError:false — no nudge, and the counter resets.
+  if (typeof maybeRanges === "string") throw new Error(maybeRanges);
   const ranges = maybeRanges;
   if (ranges.length === 0) return "No ranges provided.";
   const { state: initialState, coreMessages } = await runtime.stateFor(ctx);

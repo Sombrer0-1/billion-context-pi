@@ -8,7 +8,7 @@ import type { CoreMessage, NudgeDecision, CompressionBlock, Prompts } from "acp-
 import { renderNudgeText, resolvePrompts, defaultPrompts } from "acp-kernel";
 import { type AdapterConfig, resolveDelegate } from "./config.js";
 import { createRuntime, type AcpRuntime, MAX_COMPRESS_ATTEMPTS } from "./runtime.js";
-import { makeCompressTool } from "./compress-tool.js";
+import { makeCompressTool, isCompressSuccessText } from "./compress-tool.js";
 import { makeDecompressTool } from "./decompress-tool.js";
 import { makeSearchTool } from "./search-tool.js";
 import { makeStatusTool } from "./status-tool.js";
@@ -324,8 +324,10 @@ function wireContextTransform(pi: ExtensionAPI, runtime: AcpRuntime): void {
     // failure at 11:41Z, then 95 minutes of nudge silence). Re-prompt
     // IMMEDIATELY after a failure, quoting the error so the failed call is
     // salient, capped at MAX_COMPRESS_ATTEMPTS per user turn; a successful
-    // compress resets the counter.
-    const compressOutcomes = collectCompressOutcomes(entries);
+    // compress resets the counter. Only outcomes from the CURRENT user turn
+    // are considered — a stale failure from an earlier turn must never
+    // re-prompt (the user has moved on) and the cap must stay reachable.
+    const compressOutcomes = collectCompressOutcomes(entries, turnStartIndex(entries));
     if (compressOutcomes.length > 0) {
       const outcome = runtime.noteCompressOutcomes(turnKey, compressOutcomes);
       const failed = outcome.retryFor !== null ? compressOutcomes.find((o) => o.toolCallId === outcome.retryFor) : undefined;
@@ -500,15 +502,30 @@ function collectOriginals(entries: Array<{ type: string; id: string; message?: A
   return map;
 }
 
-// Compress toolResults visible in the current context — the raw material for
-// the failure-triggered retry nudge above.
-function collectCompressOutcomes(entries: Array<{ type: string; id: string; message?: AgentMessage }>): Array<{ toolCallId: string; isError: boolean; text: string }> {
-  const out: Array<{ toolCallId: string; isError: boolean; text: string }> = [];
-  for (const entry of entries) {
+// Index of the last user-role entry — the start of the current turn.
+// Everything strictly AFTER this index belongs to the current turn; -1 when
+// the session has no user message yet.
+function turnStartIndex(entries: Array<{ type: string; message?: { role?: string } }>): number {
+  for (let i = entries.length - 1; i >= 0; i--) {
+    if (entries[i]!.message?.role === "user") return i;
+  }
+  return -1;
+}
+
+// Compress toolResults from the CURRENT user turn only — the raw material for
+// the failure-triggered retry nudge above. Scoping matters: feeding the whole
+// session would keep an old failure as the "newest outcome" forever, and the
+// per-turn counter reset would then re-prompt it with count 0 on every LLM
+// call of every later turn (review finding on 7ddd2c6).
+function collectCompressOutcomes(entries: Array<{ type: string; id: string; message?: AgentMessage }>, startIndex: number): Array<{ toolCallId: string; isError: boolean; success: boolean; text: string }> {
+  const out: Array<{ toolCallId: string; isError: boolean; success: boolean; text: string }> = [];
+  for (let i = Math.max(startIndex, -1) + 1; i < entries.length; i++) {
+    const entry = entries[i]!;
     if (entry.type !== "message" || !entry.message) continue;
     const m = entry.message as { role?: string; toolName?: string; toolCallId?: string; isError?: boolean; content?: unknown };
     if (m.role !== "toolResult" || m.toolName !== "compress" || !m.toolCallId) continue;
-    out.push({ toolCallId: m.toolCallId, isError: m.isError === true, text: extractText(m.content) });
+    const text = extractText(m.content);
+    out.push({ toolCallId: m.toolCallId, isError: m.isError === true, success: m.isError !== true && isCompressSuccessText(text), text });
   }
   return out;
 }
@@ -517,7 +534,7 @@ function compressRetryMessage(errorText: string, attempt: number, maxAttempts: n
   // pi-core validation errors append the full received arguments — huge and
   // useless as a quote. Keep only the error lines before that dump.
   const cut = errorText.indexOf("\n\nReceived arguments:");
-  const quote = (cut > 0 ? errorText.slice(0, cut) : errorText).slice(0, 600);
+  const quote = (cut !== -1 ? errorText.slice(0, cut) : errorText).slice(0, 600);
   const text = [
     `[ACP] Your compress call FAILED (attempt ${attempt} of ${maxAttempts}) — nothing was compressed.`,
     "",

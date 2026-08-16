@@ -63,15 +63,19 @@ export interface AcpRuntime {
   /** Drop per-session tracking state (session_start). */
   clearSessionTracking(sid: string): void;
   adapter: AdapterConfig;
+  setAdapter(adapter: AdapterConfig): void;
   prompts: Prompts;
   setPrompts(prompts: Prompts): void;
   markNudgeShown(turnKey: string): void;
   nudgeShownFor(turnKey: string): boolean;
-  /** Process compress toolResults for the current turn (idempotent per toolCallId).
-   *  Returns the failure count, whether the NEWEST outcome is a failure that
-   *  still needs a retry prompt (null when succeeded or capped), and whether
-   *  the cap was just reached by this call. */
-  noteCompressOutcomes(turnKey: string, outcomes: ReadonlyArray<{ toolCallId: string; isError: boolean }>): { count: number; retryFor: string | null; cappedNow: boolean };
+  /** Process compress toolResults for the CURRENT user turn only (the caller
+   *  scopes the list — see collectCompressOutcomes in src/index.ts); idempotent
+   *  per toolCallId. Outcome classes: isError → failure (count++), success
+   *  panel text → reset, other non-error text → neutral (count unchanged).
+   *  Returns the failure count, the toolCallId of the newest failure that
+   *  still needs a retry prompt (null when none, capped, or count 0), and
+   *  whether the cap was just reached by this call. */
+  noteCompressOutcomes(turnKey: string, outcomes: ReadonlyArray<{ toolCallId: string; isError: boolean; success: boolean }>): { count: number; retryFor: string | null; cappedNow: boolean };
   clearNudgeTracking(): void;
   clearCompressRetryTracking(): void;
   liveContextLimit(ctx: ExtensionContext): number;
@@ -227,7 +231,7 @@ function pruneOrphanRefs(state: CompressionState, messages: ReturnType<typeof en
     if (!retainedRawIds.has(rawId)) delete state.messageRefs.byRef[ref];
   }
 }
-/** Max compress attempts (successful or not) that get a retry prompt per user turn. */
+/** Max FAILED compress calls that get a retry prompt per user turn. */
 export const MAX_COMPRESS_ATTEMPTS = 3;
 
 export function createRuntime(adapter: AdapterConfig): AcpRuntime {
@@ -270,17 +274,19 @@ export function createRuntime(adapter: AdapterConfig): AcpRuntime {
 
   // Failure-triggered compress retry state (see wireContextTransform): a
   // failed compress call consumed the turn's nudge budget while nothing got
-  // compressed — re-prompt immediately, capped at MAX_COMPRESS_ATTEMPTS per
-  // user turn. Success resets the counter; the context event fires repeatedly
-  // per assistant reply, so counting is deduped by toolCallId while the retry
-  // prompt itself re-injects on every fire until the model retries (or the
-  // cap hits) — pi rebuilds context per LLM call, a one-shot append would
-  // vanish before the model ever sees it.
+  // compressed — re-prompt immediately, capped at MAX_COMPRESS_ATTEMPTS FAILED
+  // CALLS per user turn (prompt frequency within a turn is not capped: the
+  // prompt re-injects on every fire until the model retries — pi rebuilds
+  // context per LLM call, a one-shot append would vanish). The caller feeds
+  // only CURRENT-turn outcomes, so stale failures never re-prompt and the cap
+  // is always reachable; success resets the counter, neutral outcomes
+  // (non-error text that is not a success panel) leave it frozen so mixed
+  // failure modes cannot bypass the cap.
   const compressOutcomeSeen = new Set<string>();
   let compressFailTurnKey: string | null = null;
   let compressFailCount = 0;
 
-  function noteCompressOutcomes(turnKey: string, outcomes: ReadonlyArray<{ toolCallId: string; isError: boolean }>): { count: number; retryFor: string | null; cappedNow: boolean } {
+  function noteCompressOutcomes(turnKey: string, outcomes: ReadonlyArray<{ toolCallId: string; isError: boolean; success: boolean }>): { count: number; retryFor: string | null; cappedNow: boolean } {
     if (compressFailTurnKey !== turnKey) {
       compressFailTurnKey = turnKey;
       compressFailCount = 0;
@@ -291,12 +297,16 @@ export function createRuntime(adapter: AdapterConfig): AcpRuntime {
       compressOutcomeSeen.add(o.toolCallId);
       if (o.isError) {
         compressFailCount += 1;
-      } else {
+      } else if (o.success) {
         compressFailCount = 0;
       }
+      // neutral: counter untouched
     }
     const latest = outcomes.length > 0 ? outcomes[outcomes.length - 1] : undefined;
-    const retryFor = latest && latest.isError && compressFailCount < MAX_COMPRESS_ATTEMPTS ? latest.toolCallId : null;
+    // count >= 1 guards against a deduped stale failure sliding in with a
+    // reset-to-0 counter (defense in depth; the caller's turn scoping already
+    // prevents it — an "attempt 0 of 3" prompt must be impossible).
+    const retryFor = latest && latest.isError && compressFailCount >= 1 && compressFailCount < MAX_COMPRESS_ATTEMPTS ? latest.toolCallId : null;
     const cappedNow = compressFailCount >= MAX_COMPRESS_ATTEMPTS && prevCount < MAX_COMPRESS_ATTEMPTS;
     return { count: compressFailCount, retryFor, cappedNow };
   }
