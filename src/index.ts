@@ -72,7 +72,12 @@ function wireSessionLifecycle(pi: ExtensionAPI, runtime: AcpRuntime): void {
     setDelegateDisplayUsage("separate");
     const sid = ctx.sessionManager.getSessionId();
     runtime.clearSessionTracking(sid);
-    logInfo("session", { event: "start", sid, cwd: ctx.cwd, debug: runtime.adapter.debug ?? null, version: typeof CURRENT_VERSION !== "undefined" ? CURRENT_VERSION : null });
+    // Model identity on every session start: diagnosing "which model loops
+    // on compress rejections" from user logs required cwd forensics — the log
+    // never said which model it was. id + contextWindow also catch window
+    // misconfigurations. (modelId above already feeds density calibration.)
+    const modelInfo = ctx.model as { id?: string; contextWindow?: number; api?: string } | undefined;
+    logInfo("session", { event: "start", sid, cwd: ctx.cwd, debug: runtime.adapter.debug ?? null, version: typeof CURRENT_VERSION !== "undefined" ? CURRENT_VERSION : null, model: modelInfo?.id ?? null, modelApi: modelInfo?.api ?? null, contextWindow: modelInfo?.contextWindow ?? null });
     try {
       const user = await loadUserConfig(ctx.cwd);
       runtime.setAdapter(applyUserConfig(runtime.adapter, user));
@@ -181,6 +186,7 @@ function wireContextTransform(pi: ExtensionAPI, runtime: AcpRuntime): void {
 
       logInfo("turn", {
         sid,
+        model: (ctx.model as { id?: string } | undefined)?.id ?? null,
         inMsgs: coreMessages.length,
         outMsgs: turn.messages.length,
         tokens: tokenCount,
