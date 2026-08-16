@@ -46,9 +46,11 @@ const ZH = "中".repeat(300);   // 300 CJK tokens
 const ZH2 = "中".repeat(150);  // 150 CJK tokens
 
 function beforeTokensFrom(out: string): number {
-  const m = /▣ ACP \| (\d+) →/.exec(out);
+  // Panel renders ≥1000 compactly ("1.0K") — normalize to tokens.
+  const m = /▣ ACP \| ([\d.]+)(K?) →/.exec(out);
   assert.ok(m, `no beforeTokens in output: ${out}`);
-  return Number(m![1]!);
+  const n = Number(m![1]!);
+  return m![2] === "K" ? Math.round(n * 1000) : n;
 }
 
 async function runContextRound(handlers: Map<string, any[]>, ctx: any) {
@@ -74,7 +76,7 @@ test("compress beforeTokens at density=1 is uncalibrated estimateTokens", async 
     undefined, undefined, ctx,
   );
   const text = typeof out === "string" ? out : out.content?.[0]?.text ?? String(out);
-  assert.equal(beforeTokensFrom(text), 303); // 3 (hello world) + 300 (ZH)
+  assert.equal(beforeTokensFrom(text), 324); // 3 + 300 (ZH) + <acp> tag chars (~21)
 });
 
 test("compress beforeTokens scales with calibrated density (Phase 2)", async () => {
@@ -105,5 +107,6 @@ test("compress beforeTokens scales with calibrated density (Phase 2)", async () 
   );
   const text = typeof out === "string" ? out : out.content?.[0]?.text ?? String(out);
   // estTotal = 3+300+150+150 = 603；×1.6 = 964.8 → 965
-  assert.equal(beforeTokensFrom(text), 965);
+  // est 603 + tag overhead (4 msgs × ~21 chars / 4) ≈ 645 × 1.6 ≈ 1032 → 1.0K
+  assert.match(text, /▣ ACP \| 1\.0K →/);
 });
