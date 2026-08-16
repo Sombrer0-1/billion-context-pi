@@ -2,7 +2,7 @@ import { Type, type Static } from "typebox";
 import type { AgentToolResult, ExtensionContext, ToolDefinition } from "@earendil-works/pi-coding-agent";
 import type { AcpRuntime } from "./runtime.js";
 import { buildStatusReport, defaultCountTokens, formatRanges } from "acp-kernel";
-import { estimateTokens, collectCoveredMessageIds } from "./tokens.js";
+import { estimateTokens, collectCoveredMessageIds, calibrateTokens } from "./tokens.js";
 import { getSystemPromptText } from "./compat.js";
 import { viableRanges } from "billion-context-kit";
 import { logThrow } from "./log.js";
@@ -57,6 +57,7 @@ async function handleStatus(args: StatusArgs, runtime: AcpRuntime, ctx: Extensio
   // Sent-view arbitration (same scale as the context transform): never the
   // session-tree number from getContextUsage, which includes compressed
   // originals and never shrinks (false emergencies; see src/index.ts).
+  const modelId = (ctx.model as { id?: string } | undefined)?.id ?? "default";
   const systemPromptText = getSystemPromptText(ctx);
   const systemPromptTokens = systemPromptText ? defaultCountTokens(systemPromptText) : 0;
   const sentTokens = estimateTokens(coreMessages, coveredIds) + systemPromptTokens;
@@ -64,7 +65,7 @@ async function handleStatus(args: StatusArgs, runtime: AcpRuntime, ctx: Extensio
     messages: coreMessages,
     state,
     config,
-    tokenCount: sentTokens,
+    tokenCount: calibrateTokens(sentTokens, runtime.density.densityFor(modelId)),
   });
   const processed = turn.messages;
 

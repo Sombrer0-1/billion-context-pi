@@ -70,6 +70,16 @@ export class DensityEstimator {
     }
     if (est.postCompressionSkip) {
       est.postCompressionSkip = false;
+      // Re-anchor on the clean post-compression basis. The postCompression
+      // round's own usage may still reflect the pre-compression size, so the
+      // re-anchor happens here (one round later), not on that round. Without
+      // it the pre-compression anchor blocks resampling until the estimate
+      // regrows past it (long dead zone) and the first crossing sample can
+      // be a clamped outlier.
+      est.anchorReal = realTotal;
+      est.anchorEst = estTotal;
+      est.pendingDensity = null;
+      est.confirmCount = 0;
       return;
     }
     if (est.anchorReal === null || est.anchorEst === null) {

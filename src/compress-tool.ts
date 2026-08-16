@@ -6,7 +6,7 @@ import type {
 } from "@earendil-works/pi-coding-agent";
 import type { AcpRuntime } from "./runtime.js";
 import { debug, logError, logInfo, logThrow } from "./log.js";
-import { estimateTokens, collectCoveredMessageIds } from "./tokens.js";
+import { estimateTokens, collectCoveredMessageIds, calibrateTokens } from "./tokens.js";
 import { defaultCountTokens } from "acp-kernel";
 import { getSystemPromptText } from "./compat.js";
 
@@ -63,6 +63,7 @@ async function handleCompress(args: CompressArgs, runtime: AcpRuntime, ctx: Exte
   const config = runtime.configFor(ctx);
   // Sent-view arbitration — the same scale as the context transform and
   // acp_status (see src/index.ts): never the session-tree tokenCount.
+  const modelId = (ctx.model as { id?: string } | undefined)?.id ?? "default";
   const systemPromptText = getSystemPromptText(ctx);
   const systemPromptTokens = systemPromptText ? defaultCountTokens(systemPromptText) : 0;
   const sentTokens = estimateTokens(coreMessages, collectCoveredMessageIds(initialState)) + systemPromptTokens;
@@ -70,16 +71,16 @@ async function handleCompress(args: CompressArgs, runtime: AcpRuntime, ctx: Exte
     messages: coreMessages,
     state: initialState,
     config,
-    tokenCount: sentTokens,
+    tokenCount: calibrateTokens(sentTokens, runtime.density.densityFor(modelId)),
   });
   const state = turn.state;
   const messages = turn.messages;
   // Display-layer density alignment (doc §3.3): beforeTokens is calibrated to
   // the same scale as the kernel's injected countTokens (which already carries
   // density), so the numbers the model sees match real usage.
-  const modelId = (ctx.model as { id?: string } | undefined)?.id ?? "default";
   const density = runtime.density.densityFor(modelId);
-  const beforeTokens = Math.round(estimateTokens(messages, collectCoveredMessageIds(state)) * density);  const summaryMaxChars = args.summaryMaxChars;
+  const beforeTokens = calibrateTokens(estimateTokens(messages, collectCoveredMessageIds(state)), density);
+  const summaryMaxChars = args.summaryMaxChars;
   const topLevelTopic = args.topic;
 
   debug.event("compress-in", {
