@@ -68,9 +68,10 @@ test("negative Δest (compression round) is skipped and does not corrupt anchor"
   d.update(MODEL, 100_000, 20_000); // Δest = -31_000 → skip
   // 压缩后第一轮 postCompression=true → 跳过
   d.update(MODEL, 100_000, 20_000, true);
-  // 之后正常轮继续，锚点仍是压缩前的（Δest 累积窗口拉长）
-  d.update(MODEL, 101_600, 51_000); // 与 anchor 的 Δ 相同 → instant 1.6, pending
-  d.update(MODEL, 103_200, 52_000); // confirm → adopt
+  // 下一轮：在干净的压缩后基准上重新锚定（锚点不再跨越压缩事件）
+  d.update(MODEL, 101_600, 51_000); // re-anchor，不采样
+  d.update(MODEL, 103_200, 52_000); // Δ=(1600,1000) → 1.6 pending
+  d.update(MODEL, 104_800, 53_000); // 1.6 confirm → adopt
   assert.equal(d.densityFor(MODEL), 1.6);
 });
 
@@ -150,5 +151,52 @@ test("null realTotal freezes anchors without corrupting", () => {
   d.update(MODEL, 101_600, 51_000); // 1.6 pending
   d.update(MODEL, null, 52_000); // 无 usage → 跳过
   d.update(MODEL, 103_200, 52_000); // 与 anchor 差 3200/2000 = 1.6 → confirm → adopt
+  assert.equal(d.densityFor(MODEL), 1.6);
+});
+
+// ─── post-compression re-anchoring (fixes the pre-compression-anchor dead zone) ───
+
+test("re-anchors on the round AFTER postCompression — no dead zone", () => {
+  const d = est();
+  d.update(MODEL, 300_000, 200_000); // anchor
+  d.update(MODEL, 301_600, 201_000); // 1.6 pending
+  d.update(MODEL, 303_200, 202_000); // 1.6 adopt
+  assert.equal(d.densityFor(MODEL), 1.6);
+  // compression frees 100K est / 150K real; next context round reports the
+  // (still stale, pre-compression-sized) usage
+  d.update(MODEL, 303_000, 100_000, true); // postCompression → set skip
+  // one round later: usage caught up to the compressed context → re-anchor here
+  d.update(MODEL, 151_500, 101_000);
+  // resampling starts from the NEW anchor immediately (no 100K regrowth wait)
+  d.update(MODEL, 153_100, 102_000); // Δ=(1600,1000) → 1.6 pending
+  d.update(MODEL, 154_700, 103_000); // 1.6 confirm → adopt
+  assert.equal(d.densityFor(MODEL), 1.6);
+});
+
+test("re-anchoring discards the pre-compression pending confirmation", () => {
+  const d = est();
+  d.update(MODEL, 300_000, 200_000); // anchor
+  d.update(MODEL, 301_600, 201_000); // 1.6 pending (count=1) — not yet adopted
+  // compress before confirmation completes
+  d.update(MODEL, 301_600, 100_000, true); // postCompression → skip
+  d.update(MODEL, 151_600, 101_000); // re-anchor; stale pending(1.6) must be dropped
+  // if the stale pending survived, this sample would be the 2nd confirmation
+  // and adopt immediately — it must instead start a FRESH count=1
+  d.update(MODEL, 153_200, 102_000); // 1.6 → pending only
+  assert.equal(d.densityFor(MODEL), 1, "fresh confirmation cycle must not adopt on its first sample");
+  d.update(MODEL, 154_800, 103_000); // 2nd consistent sample → adopt
+  assert.equal(d.densityFor(MODEL), 1.6);
+});
+
+test("null usage on the re-anchor round defers the re-anchor without losing the flag", () => {
+  const d = est();
+  d.update(MODEL, 300_000, 200_000);
+  d.update(MODEL, 301_600, 201_000);
+  d.update(MODEL, 303_200, 202_000); // adopt 1.6
+  d.update(MODEL, 303_200, 100_000, true); // postCompression
+  d.update(MODEL, null, 100_500); // usage missing → flag must persist
+  d.update(MODEL, 151_500, 101_000); // re-anchor now
+  d.update(MODEL, 153_100, 102_000); // pending
+  d.update(MODEL, 154_700, 103_000); // adopt
   assert.equal(d.densityFor(MODEL), 1.6);
 });

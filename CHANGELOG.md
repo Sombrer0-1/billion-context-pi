@@ -1,5 +1,31 @@
 # Changelog
 
+## Unreleased (master, since v0.1.38)
+
+- Density calibration (Phase 2 of token calibration) + token-count snapshot: kernel 0.0.24→0.0.27 (`acp-kernel`), `src/density.ts` 累积锚点密度估计器（clamp [0.5,2.5]、Δest≥50、±20% 双轮确认、per-model 隔离、压缩后重锚），`countTokens` 注入 kernel；`tokenSnapshot` 跨重启稳定 `<acp>` 标签数字，修复校准期前缀缓存反复重建（closes #146）(#155)
+- Three-level compress cascade (global > provider > model, per-field deepest-wins): `compress.providers` in acp.json (#145)
+- `decompress` `toFile` 加固：拒绝经符号链接逃出 `tmpdir()`/`~/.cache/opencode`/`~/.cache/pi` 的路径（含悬空链接）(#140)
+- **fix(density)**: 压缩后密度重锚定 — 原实现锚点跨压缩事件不重置，重采样被阻断直到 est 涨回压缩前水平（长死区）；现于 post-compression 跳过轮在干净基准上重锚并丢弃旧 pending 确认
+- **fix(density)**: `postCompression` 检测改为 runtime 按 session 跟踪新 active block（原实现比较单次 processTurn 输入/输出 state，而 block 只能由 applyCompression 在事件间创建，标志生产路径永远不触发）
+- **fix(usage)**: 四个 processTurn 调用点的 `tokenCount` 改为 `rawSentTokens × density`（`calibrateTokens`）— 75% 强制 nudge / 95% emergency truncate 在 provider 锚定尺度上仲裁，CJK 会话不再偏晚触发（估计器样本仍用 RAW 口径）
+- docs: token-calibration-plan 对齐实现（T2/T3 随 density 放大、mid-session 模型切换为 per-model 隔离、重锚时机、postCompression 检测方式）
+
+## v0.1.38
+
+- **fix: sent-view nudge arbitration** — 四个 processTurn 调用点统一用发送视图估算（`estimateTokens + sysPrompt`）仲裁 nudge/usage，不再用 `getContextUsage` 的 session-tree 口径（provider 不报 usage 时树总量只增不减 → 永久假 EMERGENCY；omp issue #18 同类）(#150)
+- **adopt billion-context-kit 0.2.0** — `/acp` 面板改用共享 `buildStatusPanel`（双账本：session accounting / sent view、viability 过滤、bar 用 sent 视图、block 列表 topic 回退），`viableRanges` 移入 kit (#149)
+- **fix: 只推荐 viable 可压缩范围（≥200 tokens）** — 注入 nudge / `acp_status` / `/acp` 面板三处统一过滤碎片小范围（小范围进批量 compress 会因 summary 过短整体失败）(#148)
+- docs(readme): 配置参考指向 CONFIGURATION.md (closes #35) (#144)
+- acp-kernel 0.0.23 → 0.0.24
+
+## v0.1.37
+
+- feat(prompts): acp.json 可定制提示词（Layer 2，默认提示词字节级不变）(#128)
+- fix(omp): 转换上下文/分支切换后保留压缩状态；provider 前缀后保留压缩 ref (#138 + omp 系列修复)
+- fix: block decompress 在树导航后回退到完整 session 树 (#133)
+- fix: delegate 子代理在嵌入宿主（如 pi-web）下解析正确的 pi CLI 入口 (#130)
+- ci: Windows 加入测试矩阵 + 跨平台 e2e runner（真实 `pi -p`）(#132, #134)
+
 ## v0.1.36
 
 - Bump acp-kernel to 0.0.21 (two-tier gating: maxContextLimitPct 75% force-nudge + emergencyThresholdPct 95% truncate, spam fix when no compressible content, over-limit emergency voice)

@@ -19,6 +19,15 @@ export function estimateTokens(messages: CoreMessage[], coveredIds?: Set<string>
   return tokens;
 }
 
+/** Scale a raw (uncalibrated) sent-view estimate by the per-model density
+ *  learned from provider usage (density = real/estimate). Used for nudge /
+ *  usage / emergency arbitration at every processTurn site so the decision
+ *  runs on the provider-anchored scale; the estimator itself is always fed
+ *  the RAW estimate — see density.ts. */
+export function calibrateTokens(estimate: number, density: number): number {
+  return density === 1 ? estimate : Math.round(estimate * density);
+}
+
 /** Id of the last user-role entry — used as a per-turn key so a nudge prints at
  *  most once per turn. Returns undefined if there is no user message yet. */
 export function lastUserMessageId(entries: { id: string; message?: { role?: string } }[]): string | undefined {

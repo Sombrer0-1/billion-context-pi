@@ -118,6 +118,8 @@ tokens: countTokens(msg.text ?? "")
 每轮 context 事件：
   if (postCompressionSkip):                     // 压缩后第一轮跳过（D7/F1）
     postCompressionSkip = false
+    anchorReal = realTotal; anchorEst = estTotal // 在干净的压缩后基准上重新锚定
+    pendingDensity = null; confirmCount = 0      // 丢弃压缩前窗口的 pending 确认
     return
   Δreal = realTotal - anchorReal                // provider 累计真实增量（同窗口）
   Δest  = estTotal - anchorEst                  // 估算累计增量（同窗口）
@@ -127,7 +129,10 @@ tokens: countTokens(msg.text ?? "")
     anchorReal = realTotal; anchorEst = estTotal // 推进锚点
 ```
 
-压缩触发时设置 `postCompressionSkip = true`（与 §5.1 的 flag 一致）。
+> 实现注（2026-08-16）：重新锚定放在**跳过轮**（压缩后第二轮）而非
+> postCompression 轮本身——后者读到的 provider usage 可能还是压缩前的体积。
+> 若不重锚，压缩前的锚点会阻断重采样直到 est 涨回压缩前水平（长死区），
+> 跨界首个样本还可能被 clamp 成离群值（见 tests/density.test.ts 回归用例）。
 
 然后 `createCore({ countTokens: (text) => defaultCountTokens(text) × density })`。
 
@@ -143,11 +148,20 @@ tokens: countTokens(msg.text ?? "")
 直接除会污染系数；相邻两轮差值自动消掉固定开销，得到纯"消息真实 token / 估算 token"密度。
 本会话实测密度 ≈ 1.6-1.8（中文为主）。
 
-### 3.3 第三层 — compress 工具返回值与 acp_status 对齐
+### 3.3 第三层 — 决策与显示层对齐（含 usage 校准）
 
 `compress-tool.ts` 的 `beforeTokens` 与 status breakdown 已用 `defaultCountTokens`
 （CJK-aware），统一改走注入的校准 countTokens，让**模型看到的数字、footer、nudge
 判断全部同口径**。
+
+**usage/emergency 仲裁同乘 density（实现注 2026-08-16，新增）**：四个 processTurn
+调用点（context transform / compress / acp_status / /acp panel）的 `tokenCount` 一律
+`rawSentTokens × density`（`calibrateTokens`）。原因：`decideNudge` 的
+`usage = tokenCount / limit` 直接驱动 75% 强制 nudge 与 95% emergency truncate，
+若用未校准的 CJK-aware 估算，CJK 会话（real/est ≈ 1.2-1.6）会在真实占用
+已超窗后安全阀才动作。注意**估计器样本仍喂 RAW sentTokens**——样本若也乘
+density，density 会追逐自己的校准值发散。回归测试：
+tests/density-usage-fixes.test.ts。
 
 ## 4. 系数收敛（无预热期）
 
@@ -168,19 +182,30 @@ tokens: countTokens(msg.text ?? "")
 ## 5. 边界与风险
 
 1. **压缩瞬间 Δest 为负** → `Δest >= 50` 门槛自然跳过；压缩后第一轮正增长可能含残余
-   realUsage（provider 在压缩前返回），建议压缩后设置 flag 再跳过一轮（评审 D7）
+   realUsage（provider 在压缩前返回），压缩后设置 flag 再跳过一轮（评审 D7）。
+   **检测方式（实现注 2026-08-16）**：block 由 compress 工具在两次 context 事件**之间**
+   创建（`processTurn` 从不创建 block），因此不能靠单次 processTurn 的输入/输出 state
+   比较检测——实现为 runtime 按 session 记录上一轮 active block id 集
+   （`noteActiveBlocks`），本轮加载 state 出现新 active block 即置 flag。
 2. **会话开始无 realUsage** → density 初始 1，第二轮起自然收敛
-3. **模型/窗口切换** → `session_start` 重置 density（runtime 已有 `clearNudgeTracking`）；
-   **mid-session 模型切换**（如 A 模型 → B 模型）也要重置——不同 tokenizer 的 CJK 密度
-   差异巨大（DeepSeek 1.2 vs GPT-4 0.7 vs Claude 0.5），且不同 provider 的 usage 统计
-   口径不同（thinking/cache tokens 是否单列），切换后 density 应重新收敛（评审 D6）
+3. **模型/窗口切换** → `session_start` 重置 density（runtime 已有 `clearNudgeTracking`）。
+   **mid-session 模型切换**（如 A 模型 → B 模型）：不同 tokenizer 的 CJK 密度差异巨大
+   （DeepSeek 1.2 vs GPT-4 0.7 vs Claude 0.5），且不同 provider 的 usage 统计口径不同
+   （thinking/cache tokens 是否单列），切换后 density 应重新收敛（评审 D6）。
+   **实现注（2026-08-16）**：实现为 per-model 隔离（切换模型即使用目标模型自己的
+   条目，新模型从 1 开始收敛，不会跨模型污染）+ 仅 `session_start` 重置当前模型；
+   未监听 mid-session 切换事件——A→B→A 回切会复用 A 的旧条目，约 2 个采样轮后
+   被 C1 双轮确认机制重新校准，代价可接受，不做额外监听。
 4. **per-model 存储** → density 不能是 runtime 全局单值，应为 `Map<modelId, number>`
    （同一个 provider 下有多个模型时各算各的）；并行 session 也要隔离，key 到
    `sessionId × modelId` 粒度（评审 D5）
 5. **density clamp [0.5, 2.5]** → 上界从 4 收紧：没有自然语言能达到 4 token/char，
    即使 CJK+emoji 混合也不超过 2.5；下界 0.5 给纯英文留余量（评审 D3）
 6. **最小 Δest 阈值 = 50** → 微消息（1-2 字符）的比值极不稳定（评审 D4）
-7. **T2/T3 不受影响** → summary 本身短，CJK-aware 已足够
+7. **T2/T3 同乘 density（实现注 2026-08-16，替代原"不受影响"结论）** → 注入的
+   countTokens 是 kernel 内部唯一计数器，T2/T3 的 summary pending 也随 density 放大。
+   影响小（summary 短；CJK 摘要被放大更接近真实占用），且方向正确，**保持实现现状**；
+   如需严格按原规格隔离 T2/T3，需 kernel 侧拆分计数器（未做）。
 8. **密度不持久化（已知行为）** → density 存内存 Map，Pi 重启后回 1；冷启动
    第 1 轮低估 ~40%，2-3 轮后自动收敛（评审 B1）。不做持久化：收敛快、
    `*.acp.json` 格式改动需向后兼容、冷启动不差于现状（chars/4 本就是当前行为）
@@ -246,7 +271,9 @@ tokens: countTokens(msg.text ?? "")
 - [x] **已决定**：累积锚点法采用"连续 2 轮 ±20% 才采纳"加固（C1 推荐实现，§3.2）
 - [x] **已决定**：`acp_status` breakdown **不乘** density——status 显示 kernel 口径（调试视角），
       footer 已显示 provider 真实值，用户有对照
-- [x] **已决定**：T2/T3 pending **不乘** density——summary 短，CJK-aware 足够（§5.7）
+- [x] **已决定（2026-08-16 修订）**：T2/T3 pending **随** density 放大（注入计数器
+  是 kernel 内部唯一计数器，未拆分）——原"不乘"结论与实现不符，现以实现为准，
+  见 §5.7
 - [x] **已验证**：`computeProtectedRefs` 的 preserveRecentTokens 改用 countTokens 后，保护区大小变化**影响存在但可控，且是正确方向**——中文消息的保护区物理大小变小（1 字符 ≈ 1 token 而非 0.25），`preserveRecentTokens` 现在保护"最近 N 真实 token"而非"最近 N 字符/4 估算"；`preserveRecentMessages` 作为消息数兜底仍有效（至少保护最近 N 条消息）；nudge 因可压缩范围变大而略微提前，正是校准目的。测试见 `tests/recommend.test.ts` 第 3 例（computeProtectedRefs 注入 countTokens 撑大保护区）。结论：校准后的正确语义，非回归。
 - [x] **已确认**：runtime 拿 modelId 用 `ctx.model.id`（`src/delegate-tool.ts:562`，完整标识符）
 
