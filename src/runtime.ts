@@ -9,11 +9,14 @@ import {
   type Prompts,
 } from "acp-kernel";
 import { resolveConfig, type AdapterConfig } from "./config.js";
+import { DensityEstimator } from "./density.js";
 import { entriesToCoreMessages, extractText, matchesStoredText, messageIdentity, messageRef } from "./messages.js";
 import { SessionStateStore, type LiveRefOrigin } from "./state.js";
 import { logInfo, logWarn } from "./log.js";
 import { findUniqueLongestRun, type MatchRange } from "./sequence-match.js";
-
+// pi exposes `sessionManager.buildContextEntries()`; omp (oh-my-pi) only has
+// `getBranch()`. Both return chronological SessionEntry[]; feature-detect so
+// the adapter runs under either host (omp's runner silently swallows the TypeError).
 type SessionEntrySource = {
   buildContextEntries?: () => SessionEntry[];
   getBranch?: () => SessionEntry[];
@@ -36,6 +39,9 @@ export function isPiHost(sm: ExtensionContext["sessionManager"]): boolean {
 export interface AcpRuntime {
   core: CompressionCore;
   store: SessionStateStore;
+  density: DensityEstimator;
+  /** 设置 countTokens 闭包使用的 modelId（每轮 context 事件调用）。 */
+  setCountModel(modelId: string): void;
   adapter: AdapterConfig;
   setAdapter(adapter: AdapterConfig): void;
   prompts: Prompts;
@@ -49,7 +55,11 @@ export interface AcpRuntime {
   save(state: CompressionState, ctx: ExtensionContext): Promise<void>;
   acquireLock(sid: string): Promise<() => void>;
 }
-
+// omp fires the context event before the current user message is persisted to
+// the session branch, so merge event.messages (exact messages about to be sent,
+// including the not-yet-persisted tail) with the persisted branch: matching
+// messages keep their stable entry id, unmatched tail messages get `live-N`
+// ids until persisted.
 function mergeLiveEntries(entries: SessionEntry[], live: AgentMessage[], state: CompressionState, origins: LiveRefOrigin[]): SessionEntry[] {
   const persisted = entries.filter((e): e is SessionMessageEntry => e.type === "message");
   const liveIdentities = live.map(messageIdentity);
@@ -181,9 +191,13 @@ function pruneOrphanRefs(state: CompressionState, messages: ReturnType<typeof en
     if (!retainedRawIds.has(rawId)) delete state.messageRefs.byRef[ref];
   }
 }
-
 export function createRuntime(adapter: AdapterConfig): AcpRuntime {
-  const core = createCore({ countTokens: defaultCountTokens });
+  const density = new DensityEstimator();
+  let countModelId = "default";
+  const core = createCore({
+    // 密度校准版 countTokens（Phase 2）：默认回落 defaultCountTokens（density=1）
+    countTokens: (text) => density.estimateWithDensity(countModelId, text),
+  });
   const store = new SessionStateStore();
   const locks = new Map<string, Promise<void>>();
   let adapterRef = adapter;
@@ -242,5 +256,4 @@ export function createRuntime(adapter: AdapterConfig): AcpRuntime {
     await store.save(state, sm.getSessionFile() ?? undefined, sm.getSessionId());
   }
 
-  return { core, store, get adapter() { return adapterRef; }, setAdapter: (a) => { adapterRef = a; }, get prompts() { return promptsRef; }, setPrompts: (p) => { promptsRef = p; }, markNudgeShown: (k) => { nudgeShownTurns.add(k); }, nudgeShownFor: (k) => nudgeShownTurns.has(k), clearNudgeTracking: () => { nudgeShownTurns.clear(); }, liveContextLimit, configFor, stateFor, save, acquireLock };
-}
+  return { core, store, density, setCountModel: (m) => { countModelId = m; }, get adapter() { return adapterRef; }, setAdapter: (a) => { adapterRef = a; }, get prompts() { return promptsRef; }, setPrompts: (p) => { promptsRef = p; }, markNudgeShown: (k) => { nudgeShownTurns.add(k); }, nudgeShownFor: (k) => nudgeShownTurns.has(k), clearNudgeTracking: () => { nudgeShownTurns.clear(); }, liveContextLimit, configFor, stateFor, save, acquireLock };}

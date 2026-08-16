@@ -62,10 +62,7 @@ async function handleCompress(args: CompressArgs, runtime: AcpRuntime, ctx: Exte
   const { state: initialState, coreMessages } = await runtime.stateFor(ctx);
   const config = runtime.configFor(ctx);
   // Sent-view arbitration — the same scale as the context transform and
-  // acp_status. processTurn here persists nudge stamps via the saved state,
-  // so a tree-scale tokenCount (provider fallback summing the whole session,
-  // never shrinks) would poison lastNudgeShownTokens/lastShownByTier at the
-  // wrong scale and suppress legitimate growth nudges afterward.
+  // acp_status (see src/index.ts): never the session-tree tokenCount.
   const systemPromptText = getSystemPromptText(ctx);
   const systemPromptTokens = systemPromptText ? defaultCountTokens(systemPromptText) : 0;
   const sentTokens = estimateTokens(coreMessages, collectCoveredMessageIds(initialState)) + systemPromptTokens;
@@ -77,12 +74,18 @@ async function handleCompress(args: CompressArgs, runtime: AcpRuntime, ctx: Exte
   });
   const state = turn.state;
   const messages = turn.messages;
-  const beforeTokens = estimateTokens(messages, collectCoveredMessageIds(state));
-  const summaryMaxChars = args.summaryMaxChars;
+  // Display-layer density alignment (doc §3.3): beforeTokens is calibrated to
+  // the same scale as the kernel's injected countTokens (which already carries
+  // density), so the numbers the model sees match real usage.
+  const modelId = (ctx.model as { id?: string } | undefined)?.id ?? "default";
+  const density = runtime.density.densityFor(modelId);
+  const beforeTokens = Math.round(estimateTokens(messages, collectCoveredMessageIds(state)) * density);  const summaryMaxChars = args.summaryMaxChars;
   const topLevelTopic = args.topic;
 
   debug.event("compress-in", {
     sid: ctx.sessionManager.getSessionId(),
+    modelId,
+    density,
     ranges: ranges.length,
     spans: ranges.map((r) => ({ span: `${r.startId}..${r.endId}`, summaryLen: r.summary.length, summary: r.summary, topic: r.topic ?? topLevelTopic ?? null })),
     blocksBefore: state.blocks.length,
@@ -90,7 +93,6 @@ async function handleCompress(args: CompressArgs, runtime: AcpRuntime, ctx: Exte
     beforeMsgCount: messages.length,
     beforeTokens,
   });
-
   const applied = runtime.core.applyCompression({
     ranges: ranges.map((r) => ({ startRef: r.startId, endRef: r.endId, summary: r.summary, topic: r.topic ?? topLevelTopic, summaryMaxChars, compressCallId: toolCallId })),
     messages,

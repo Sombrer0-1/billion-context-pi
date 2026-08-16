@@ -110,7 +110,7 @@ function compressibleMessages(): CoreMessage[] {
             id: `h_${i}`,
             role: i % 2 === 0 ? "user" : "assistant",
             contentType: "text",
-            text: `historical detail ${i}. ${"x".repeat(2000)}`,
+            text: `historical detail ${i}. ${"x".repeat(3000)}`,
         });
     }
     return msgs;
