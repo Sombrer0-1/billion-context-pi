@@ -2,7 +2,7 @@ import type { ExtensionCommandContext, RegisteredCommand } from "@earendil-works
 import type { AcpRuntime } from "./runtime.js";
 import { defaultCountTokens, parseBlockIdArg, collectBlockContent } from "acp-kernel";
 import { getSystemPromptText } from "./compat.js";
-import { collectCoveredMessageIds, estimateTokens } from "./tokens.js";
+import { collectCoveredMessageIds, estimateTokens, calibrateTokens } from "./tokens.js";
 import { buildStatusPanel } from "billion-context-kit";
 import { getDelegateUsage } from "./delegate-tool.js";
 
@@ -93,8 +93,9 @@ async function statusReport(runtime: AcpRuntime, ctx: ExtensionCommandContext): 
   const systemPromptTokens = systemPromptText ? defaultCountTokens(systemPromptText) : 0;
   const sessionTokens = realUsage?.tokens && realUsage.tokens > 0 ? realUsage.tokens : defaultCountTokens(coreMessages.map((m) => m.text ?? "").join("\n"));
   const coveredIds = collectCoveredMessageIds(state);
+  const modelId = (ctx.model as { id?: string } | undefined)?.id ?? "default";
   const sentTokens = estimateTokens(coreMessages, coveredIds) + systemPromptTokens;
-  const turn = runtime.core.processTurn({ messages: coreMessages, state, config, tokenCount: sentTokens });
+  const turn = runtime.core.processTurn({ messages: coreMessages, state, config, tokenCount: calibrateTokens(sentTokens, runtime.density.densityFor(modelId)) });
 
   // Shared kit surface renders the panel (dual accounting, viability
   // filtering, bars, block list with topic fallback). Host-specific inputs:

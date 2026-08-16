@@ -42,6 +42,14 @@ export interface AcpRuntime {
   density: DensityEstimator;
   /** 设置 countTokens 闭包使用的 modelId（每轮 context 事件调用）。 */
   setCountModel(modelId: string): void;
+  /** Record this session's active block ids for the current context round;
+   *  returns true when a new active block appeared since the previous round
+   *  (i.e. a compress happened out-of-band — blocks are created by the
+   *  compress tool between context events, so they can never be detected by
+   *  comparing a single processTurn's input/output state). */
+  noteActiveBlocks(sid: string, activeBlockIds: string[]): boolean;
+  /** Drop per-session tracking state (session_start). */
+  clearSessionTracking(sid: string): void;
   adapter: AdapterConfig;
   setAdapter(adapter: AdapterConfig): void;
   prompts: Prompts;
@@ -199,6 +207,7 @@ export function createRuntime(adapter: AdapterConfig): AcpRuntime {
     countTokens: (text) => density.estimateWithDensity(countModelId, text),
   });
   const store = new SessionStateStore();
+  const lastActiveBlockIds = new Map<string, Set<string>>();
   const locks = new Map<string, Promise<void>>();
   let adapterRef = adapter;
   let promptsRef: Prompts = defaultPrompts;
@@ -256,4 +265,15 @@ export function createRuntime(adapter: AdapterConfig): AcpRuntime {
     await store.save(state, sm.getSessionFile() ?? undefined, sm.getSessionId());
   }
 
-  return { core, store, density, setCountModel: (m) => { countModelId = m; }, get adapter() { return adapterRef; }, setAdapter: (a) => { adapterRef = a; }, get prompts() { return promptsRef; }, setPrompts: (p) => { promptsRef = p; }, markNudgeShown: (k) => { nudgeShownTurns.add(k); }, nudgeShownFor: (k) => nudgeShownTurns.has(k), clearNudgeTracking: () => { nudgeShownTurns.clear(); }, liveContextLimit, configFor, stateFor, save, acquireLock };}
+  function noteActiveBlocks(sid: string, activeBlockIds: string[]): boolean {
+    const current = new Set(activeBlockIds);
+    const prev = lastActiveBlockIds.get(sid);
+    const isNew = prev !== undefined && activeBlockIds.some((id) => !prev.has(id));
+    lastActiveBlockIds.set(sid, current);
+    return isNew;
+  }
+  function clearSessionTracking(sid: string): void {
+    lastActiveBlockIds.delete(sid);
+  }
+
+  return { core, store, density, setCountModel: (m) => { countModelId = m; }, noteActiveBlocks, clearSessionTracking, get adapter() { return adapterRef; }, setAdapter: (a) => { adapterRef = a; }, get prompts() { return promptsRef; }, setPrompts: (p) => { promptsRef = p; }, markNudgeShown: (k) => { nudgeShownTurns.add(k); }, nudgeShownFor: (k) => nudgeShownTurns.has(k), clearNudgeTracking: () => { nudgeShownTurns.clear(); }, liveContextLimit, configFor, stateFor, save, acquireLock };}

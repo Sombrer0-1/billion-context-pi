@@ -20,7 +20,7 @@ import { buildAcpSystemPrompt, ACP_DELEGATE_PROMPT } from "./system-prompt.js";
 import { delegateStatusWidget } from "./fleet-widget.js";
 import { wireToolGuardrails } from "./tool-guardrails.js";
 import { debug, setDebugEnabled, logError, logInfo, logWarn, logThrow, closeLogStream } from "./log.js";
-import { collectCoveredMessageIds, estimateTokens, lastUserMessageId } from "./tokens.js";
+import { collectCoveredMessageIds, estimateTokens, lastUserMessageId, calibrateTokens } from "./tokens.js";
 import { checkForUpdate } from "./update.js";
 import { runSetupAndNotify } from "./setup-subagent-tools.js";
 import { loadUserConfig, applyUserConfig } from "./user-config.js";
@@ -71,6 +71,7 @@ function wireSessionLifecycle(pi: ExtensionAPI, runtime: AcpRuntime): void {
     resetDelegateUsage();
     setDelegateDisplayUsage("separate");
     const sid = ctx.sessionManager.getSessionId();
+    runtime.clearSessionTracking(sid);
     logInfo("session", { event: "start", sid, cwd: ctx.cwd, debug: runtime.adapter.debug ?? null, version: typeof CURRENT_VERSION !== "undefined" ? CURRENT_VERSION : null });
     try {
       const user = await loadUserConfig(ctx.cwd);
@@ -139,7 +140,22 @@ function wireContextTransform(pi: ExtensionAPI, runtime: AcpRuntime): void {
       const systemPromptText = getSystemPromptText(ctx);
       const systemPromptTokens = systemPromptText ? defaultCountTokens(systemPromptText) : 0;
       const sentTokens = estimateTokens(coreMessages, coveredIds) + systemPromptTokens;
-      const tokenCount = sentTokens;
+      // Usage/emergency arbitration on the CALIBRATED sent view: density is
+      // the provider-anchored real/estimate ratio learned by the estimator
+      // (docs/token-calibration-plan.md §3.2). Raw CJK-aware estimates
+      // under-report CJK context by ~20-40%, which would delay the forced
+      // nudge and emergency truncate past the real window. The estimator
+      // below is fed the RAW sentTokens — its samples must stay on the
+      // raw basis or density would chase its own calibration.
+      const tokenCount = calibrateTokens(sentTokens, runtime.density.densityFor(modelId));
+      // A compress happened since the previous context round: blocks are
+      // created out-of-band by the compress tool, so detect new active
+      // blocks on the LOADED state vs. the previous round (comparing a
+      // single processTurn's input/output can never see them).
+      const postCompression = runtime.noteActiveBlocks(
+        sid,
+        state.blocks.filter((b) => b.active).map((b) => b.blockId),
+      );
 
       debug.event("context-in", {
         sid,
@@ -160,10 +176,7 @@ function wireContextTransform(pi: ExtensionAPI, runtime: AcpRuntime): void {
       // 密度校准（Phase 2）：processTurn 后调用，countTokens 用上一轮 density（1 轮延迟可忽略）。
       // real 侧 = provider 锚定 usage（缺失时锚点冻结，§5.9）；est 侧 = 发送视图估算
       // （estimateTokens 内部走 CJK 感知 defaultCountTokens，与注入 kernel 的计数器同源）。
-      // postCompression = 本次新增了 active block（模型刚压缩过）。
-      const postCompression = turn.state.blocks.some(
-        (b) => b.active && !state.blocks.some((o) => o.blockId === b.blockId)
-      );
+      // postCompression = 自上一轮 context 事件以来新增了 active block（模型刚压缩过）。
       runtime.density.update(modelId, realUsage?.tokens ?? null, sentTokens, postCompression);
 
       logInfo("turn", {
