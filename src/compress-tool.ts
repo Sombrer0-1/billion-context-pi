@@ -23,7 +23,16 @@ const RangeSpec = Type.Object({
 
 const CompressParams = Type.Object({
   topic: Type.Optional(Type.String({ description: "Fallback topic for entries without their own. Omit when each content entry specifies its own topic." })),
-  content: Type.Array(RangeSpec, { description: "One or more ranges to compress, each with start/end boundaries and a summary. When compressing multiple unrelated ranges in one call, give each its own topic." }),
+  content: Type.Union([
+    Type.Array(RangeSpec),
+    // Non-strict-tool providers (vLLM openai-completions, supportsStrictTools:
+    // false) sometimes stringify nested array arguments — session
+    // 01a00a38 died on exactly this: pi's typebox validation rejected
+    // "[{\"topic\":...}]" with "content.0: must be object" and the turn's
+    // only compress attempt was lost. Accept the JSON-encoded form and parse
+    // it in normalizeRanges below.
+    Type.String({ description: "JSON-encoded array of ranges — accepted because non-strict-tool providers sometimes stringify array arguments; parsed automatically." }),
+  ], { description: "One or more ranges to compress, each with start/end boundaries and a summary. When compressing multiple unrelated ranges in one call, give each its own topic." }),
   summaryMaxChars: Type.Optional(Type.Number({ description: "Override max summary length (default max: 20000 chars). Use when content is important and needs more detail — don't lose critical info just to fit the limit." })),
 });
 
@@ -48,7 +57,7 @@ export function makeCompressTool(runtime: AcpRuntime): ToolDefinition<typeof Com
       try {
         result = await handleCompress(params as CompressArgs, runtime, ctx, toolCallId);
       } catch (e) {
-        logThrow("compress", e, { sid: ctx.sessionManager.getSessionId(), ranges: (params as CompressArgs).content?.length ?? 0 });
+        logThrow("compress", e, { sid: ctx.sessionManager.getSessionId(), ranges: typeof (params as CompressArgs).content === "string" ? "string" : ((params as CompressArgs).content?.length ?? 0) });
         throw e;
       }
       return { details: undefined, content: [{ type: "text", text: result }] };
@@ -56,8 +65,36 @@ export function makeCompressTool(runtime: AcpRuntime): ToolDefinition<typeof Com
   };
 }
 
+type RangeEntry = Static<typeof RangeSpec>;
+
+// Normalize the content argument: array passes through; a JSON-encoded string
+// (non-strict-tool providers) is parsed. Returns an error string on bad input
+// so the retry nudge (src/index.ts) can quote it back to the model.
+function normalizeRanges(content: CompressArgs["content"]): RangeEntry[] | string {
+  let ranges: unknown = content ?? [];
+  if (typeof ranges === "string") {
+    try {
+      ranges = JSON.parse(ranges);
+    } catch (e) {
+      return `Invalid content: not valid JSON (${e instanceof Error ? e.message : String(e)}). content must be an ARRAY of {startId, endId, summary} objects — pass the array directly, not a string.`;
+    }
+  }
+  if (!Array.isArray(ranges)) {
+    return `Invalid content: expected an array of ranges, got ${ranges === null ? "null" : typeof ranges}.`;
+  }
+  for (const [i, r] of ranges.entries()) {
+    const o = r as Record<string, unknown>;
+    if (!o || typeof o !== "object" || typeof o.startId !== "string" || typeof o.endId !== "string" || typeof o.summary !== "string") {
+      return `Invalid content[${i}]: each range must be an object with string fields startId, endId, summary.`;
+    }
+  }
+  return ranges as RangeEntry[];
+}
+
 async function handleCompress(args: CompressArgs, runtime: AcpRuntime, ctx: ExtensionContext, toolCallId?: string): Promise<string> {
-  const ranges = args.content ?? [];
+  const maybeRanges = normalizeRanges(args.content);
+  if (typeof maybeRanges === "string") return maybeRanges;
+  const ranges = maybeRanges;
   if (ranges.length === 0) return "No ranges provided.";
   const { state: initialState, coreMessages } = await runtime.stateFor(ctx);
   const config = runtime.configFor(ctx);
