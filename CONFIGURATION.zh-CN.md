@@ -35,6 +35,11 @@
   "toolBashDefaultTimeout": 60,
   "toolOutputMaxBytes": 200000,
 
+  "throttleRetry": {
+    "enabled": true,
+    "maxRetries": 10
+  },
+
   "delegate": {
     "enabled": true,
     "displayUsage": "separate"
@@ -93,6 +98,7 @@
 | `modelContextLimit` | number | *(自动)* | 🟢 ACTIVE | 覆盖上下文窗口大小（token 数）。 |
 | `toolBashDefaultTimeout` | number | `60` | 🟢 ACTIVE | 模型省略 `timeout` 时注入 bash 工具的默认超时秒数。 |
 | `toolOutputMaxBytes` | number | `200000` | 🟢 ACTIVE | 工具返回文本的硬性字节上限。 |
+| `throttleRetry` | boolean \| object | `true` | 🟢 ACTIVE | 自动重试 provider 侧 token 限流错误（递进退避）。 |
 
 **delegate 键**
 
@@ -100,6 +106,16 @@
 |----|------|--------|------|------|
 | `delegate.enabled` | boolean | `true` | 🟢 ACTIVE | 启用 `acp_delegate` 工具及其系统提示部分。 |
 | `delegate.displayUsage` | string | `"separate"` | 🟢 ACTIVE | 控制 delegate 子代理的 token 用量如何报回主会话。 |
+
+**provider 限流重试键**
+
+| 键 | 类型 | 默认值 | 状态 | 说明 |
+|----|------|--------|------|------|
+| `throttleRetry.enabled` | boolean | `true` | 🟢 ACTIVE | 启用 provider token 限流错误的自动重试。 |
+| `throttleRetry.maxRetries` | number | `10` | 🟢 ACTIVE | 单个错误 episode 内 ACP 驱动重试的总预算。 |
+| `throttleRetry.baseDelayMs` | number | `60000` | 🟢 ACTIVE | 首次递进 kick 前的等待毫秒数。 |
+| `throttleRetry.maxDelayMs` | number | `300000` | 🟢 ACTIVE | 递进 kick 延迟上限。 |
+| `throttleRetry.backoffMode` | string | `"exponential"` | 🟢 ACTIVE | 延迟递进方式：`"exponential"`（每次 kick ×2）或 `"fixed"`。 |
 
 **compress 键**
 
@@ -189,6 +205,76 @@
 - **默认值：** `"separate"`
 - **状态：** 🟢 ACTIVE
 - **说明：** 控制 delegate 子代理的 token 用量如何报回主会话。`"separate"`（默认）将 delegate token 记入独立累加器——主会话总量保持干净，delegate 用量在 `acp_status` 中单独显示一块（不计入主总量）。`"merged"` 将 delegate token 用量并入工具返回的 `usage` 字段，算作主会话总量的一部分。仅在 `delegate.enabled` 为 `true` 时有意义。
+
+---
+
+## Provider 限流重试
+
+`throttleRetry` 键控制对 **provider 侧 token 限流错误** 的自动重试——例如 AWS Bedrock 的每分钟 token 吞吐量配额，其标准报错文案是 `"Too many tokens, please wait before trying again."`。当 relay 把这个错误 JSON 塞进流式 content 并带上非标准 `finish_reason` 时，Pi 侧表现为 `Provider finish_reason: error_finish` 并立即失败：Pi 内置重试不认识这个特征，而且它绝不能被当成上下文超长处理。
+
+工作方式：
+
+1. turn 以被识别的限流错误结束时，ACP 改写错误信息，让 Pi 的 **原生重试** 重跑同一个 turn（不重复用户消息、错误不进 LLM 上下文、原生 TUI 重试指示器）。Pi 原生预算小且快（3 次、2s 起步）。
+2. 如果一次 run 仍然以限流错误结束且 ACP 预算允许，ACP 等待 **递进延迟**（默认：60s、120s、240s……上限 5 分钟），然后发送一条带标记的用户消息（以 `[ACP:provider-throttle]` 开头）恢复被中断的步骤。
+3. 模型会被提示从中断处继续（系统提示说明）。等待期间用户发送新输入会 **取消** 挂起的重试。预算用尽后，错误原样呈现给你。
+
+> **不重试**（刻意留给 Pi 自身行为或直接失败）：真正的上下文超长错误（`prompt is too long` 等）、配额/计费耗尽（`quota exceeded`、`billing` 等）、以及通用 429。
+
+> **严格节奏（可选）：** 默认 ACP 先让 Pi 原生快速重试跑，再自行递进等待。如果你只想用 ACP 的递进 kick（例如 tokens/分钟配额很紧），另外在 `~/.pi/settings.json` 里设 `"retry": { "enabled": false }` 关掉 Pi 自身重试。
+
+### `throttleRetry`
+
+- **类型：** `boolean | object`
+- **默认值：** `true`（等价于全默认的 object 形式）
+- **状态：** 🟢 ACTIVE
+- **说明：** 启用/禁用 provider token 限流错误的自动重试，并调整其预算。`throttleRetry: false` 完全关闭该功能（恢复原始 fail-fast 行为）。object 形式（任意子集）：
+
+```json
+{
+  "throttleRetry": {
+    "enabled": true,
+    "maxRetries": 10,
+    "baseDelayMs": 60000,
+    "maxDelayMs": 300000,
+    "backoffMode": "exponential"
+  }
+}
+```
+
+### `throttleRetry.enabled`
+
+- **类型：** `boolean`
+- **默认值：** `true`
+- **状态：** 🟢 ACTIVE
+- **说明：** 开关。`false`（或顶层 `throttleRetry: false`）恢复原始 fail-fast 行为。
+
+### `throttleRetry.maxRetries`
+
+- **类型：** `number`（整数 ≥ 1）
+- **默认值：** `10`
+- **状态：** 🟢 ACTIVE
+- **说明：** 单个错误 episode（一次以同一限流错误结束的 run + 它触发的递进 kick）内 ACP 驱动重试的总预算。任何一次成功的非错误响应——或新的用户消息——都会开启新 episode。用尽后错误原样呈现。
+
+### `throttleRetry.baseDelayMs`
+
+- **类型：** `number`（毫秒）
+- **默认值：** `60000`
+- **状态：** 🟢 ACTIVE
+- **说明：** 首次递进 kick 前的等待毫秒数——按 Bedrock 分钟级滚动配额窗口设计。`maxDelayMs` 会被强制至少等于该值。
+
+### `throttleRetry.maxDelayMs`
+
+- **类型：** `number`（毫秒）
+- **默认值：** `300000`
+- **状态：** 🟢 ACTIVE
+- **说明：** `"exponential"` 模式下递进 kick 的延迟上限（默认参数下为 60s → 120s → 240s → 300s → 300s……）。`"fixed"` 模式下忽略，始终使用 `baseDelayMs`。
+
+### `throttleRetry.backoffMode`
+
+- **类型：** 字符串枚举 `"exponential" | "fixed"`
+- **默认值：** `"exponential"`
+- **状态：** 🟢 ACTIVE
+- **说明：** 递进 kick 之间的延迟递进方式：`"exponential"` 每次 kick 延迟翻倍（上限 `maxDelayMs`）；`"fixed"` 每次 kick 固定 `baseDelayMs`。
 
 ---
 

@@ -35,6 +35,11 @@ Create `~/.pi/acp.json` (or `<project>/.pi/acp.json`) and drop in whichever keys
   "toolBashDefaultTimeout": 60,
   "toolOutputMaxBytes": 200000,
 
+  "throttleRetry": {
+    "enabled": true,
+    "maxRetries": 10
+  },
+
   "delegate": {
     "enabled": true,
     "displayUsage": "separate"
@@ -93,6 +98,7 @@ All keys below are currently **ACTIVE**.
 | `modelContextLimit` | number | *(auto)* | 🟢 ACTIVE | Override the context limit (in tokens). |
 | `toolBashDefaultTimeout` | number | `60` | 🟢 ACTIVE | Default `bash` tool timeout in seconds when the model omits it. |
 | `toolOutputMaxBytes` | number | `200000` | 🟢 ACTIVE | Hard byte cap on tool result text. |
+| `throttleRetry` | boolean \| object | `true` | 🟢 ACTIVE | Auto-retry provider token rate-limit errors with progressive backoff. |
 
 **Delegate keys**
 
@@ -100,6 +106,16 @@ All keys below are currently **ACTIVE**.
 |-----|------|---------|--------|-------------|
 | `delegate.enabled` | boolean | `true` | 🟢 ACTIVE | Enable the `acp_delegate` tools and their system-prompt section. |
 | `delegate.displayUsage` | string | `"separate"` | 🟢 ACTIVE | Controls how delegate sub-agent token usage is reported. |
+
+**Provider throttle retry keys**
+
+| Key | Type | Default | Status | Description |
+|-----|------|---------|--------|-------------|
+| `throttleRetry.enabled` | boolean | `true` | 🟢 ACTIVE | Enable auto-retry of provider token rate-limit errors. |
+| `throttleRetry.maxRetries` | number | `10` | 🟢 ACTIVE | Total budget of ACP-driven retries per error episode. |
+| `throttleRetry.baseDelayMs` | number | `60000` | 🟢 ACTIVE | Delay before the first paced kick. |
+| `throttleRetry.maxDelayMs` | number | `300000` | 🟢 ACTIVE | Cap for paced kick delays. |
+| `throttleRetry.backoffMode` | string | `"exponential"` | 🟢 ACTIVE | Delay progression: `"exponential"` (×2 per kick) or `"fixed"`. |
 
 **Compression keys**
 
@@ -189,6 +205,76 @@ The `delegate` sub-object controls the `acp_delegate` sub-agent tool family (`ac
 - **Default:** `"separate"`
 - **Status:** 🟢 ACTIVE
 - **Description:** Controls how delegate sub-agent token usage is reported back to the main session. `"separate"` (default) tracks delegate tokens in a separate accumulator — the main session totals stay clean and delegate usage shows as its own block in `acp_status` (excluded from main totals). `"merged"` folds delegate token usage into the tool-result `usage` field so it is counted as part of the main session totals. Only meaningful when `delegate.enabled` is `true`.
+
+---
+
+## Provider Throttle Retry
+
+The `throttleRetry` key controls auto-retry of **provider-side token rate-limit errors** — e.g. AWS Bedrock's per-minute token-throughput quota, whose standard error text is `"Too many tokens, please wait before trying again."` When the relay streams that error as content with a non-standard `finish_reason`, it surfaces to Pi as `Provider finish_reason: error_finish` and fails the turn immediately: Pi's built-in retry does not recognize the signature, and it must not be treated as context overflow.
+
+How it works:
+
+1. When a turn ends in a recognized throttle error, ACP rewrites the error so Pi's **native retry** re-runs the same turn (no duplicate user message, the error is kept out of the LLM context, native TUI retry indicator). Pi's native budget is small and fast (3 attempts, 2s base).
+2. When a run still ends in a throttle error and ACP's budget allows, ACP waits a **progressive delay** (default: 60s, 120s, 240s, … capped at 5 minutes), then sends one auto-marked user message (starts with `[ACP:provider-throttle]`) that resumes the interrupted step.
+3. The model is instructed to resume where it left off (system-prompt note). Sending new input during a wait **cancels** the pending retry. When the budget is exhausted, the error is surfaced to you unchanged.
+
+> **Not retried** (deliberately left to Pi's own behavior or to fail-fast): real context-overflow errors (`prompt is too long`, …), quota/billing exhaustion (`quota exceeded`, `billing`, …), and generic 429s.
+
+> **Strict pacing (optional):** By default ACP lets Pi's native fast retries run first and then paces on its own. If you want *only* ACP's paced kicks (e.g. a very tight tokens/minute quota), additionally set Pi's own retry off via `"retry": { "enabled": false }` in `~/.pi/settings.json`.
+
+### `throttleRetry`
+
+- **Type:** `boolean | object`
+- **Default:** `true` (object form with all defaults)
+- **Status:** 🟢 ACTIVE
+- **Description:** Enable/disable auto-retry of provider token rate-limit errors and tune its budget. `throttleRetry: false` disables the feature entirely. Object form (any subset):
+
+```json
+{
+  "throttleRetry": {
+    "enabled": true,
+    "maxRetries": 10,
+    "baseDelayMs": 60000,
+    "maxDelayMs": 300000,
+    "backoffMode": "exponential"
+  }
+}
+```
+
+### `throttleRetry.enabled`
+
+- **Type:** `boolean`
+- **Default:** `true`
+- **Status:** 🟢 ACTIVE
+- **Description:** Turn the feature on/off. `false` (or top-level `throttleRetry: false`) restores the original fail-fast behavior.
+
+### `throttleRetry.maxRetries`
+
+- **Type:** `number` (integer ≥ 1)
+- **Default:** `10`
+- **Status:** 🟢 ACTIVE
+- **Description:** Total budget of ACP-driven retries for one error episode (a run ending in the same throttle error, plus the paced kicks it triggers). Any successful non-error response — or a new user message — starts a fresh episode. Exhausted → the error is surfaced to you as-is.
+
+### `throttleRetry.baseDelayMs`
+
+- **Type:** `number` (milliseconds)
+- **Default:** `60000`
+- **Status:** 🟢 ACTIVE
+- **Description:** Delay before the first paced kick — sized for Bedrock's per-minute rolling quota window. `maxDelayMs` is forced to at least this value.
+
+### `throttleRetry.maxDelayMs`
+
+- **Type:** `number` (milliseconds)
+- **Default:** `300000`
+- **Status:** 🟢 ACTIVE
+- **Description:** Cap for paced kick delays in `"exponential"` mode (60s → 120s → 240s → 300s → 300s … with defaults). Ignored in `"fixed"` mode, which always uses `baseDelayMs`.
+
+### `throttleRetry.backoffMode`
+
+- **Type:** string enum `"exponential" | "fixed"`
+- **Default:** `"exponential"`
+- **Status:** 🟢 ACTIVE
+- **Description:** Delay progression between paced kicks: `"exponential"` doubles the delay per kick (capped at `maxDelayMs`); `"fixed"` repeats `baseDelayMs` every kick.
 
 ---
 

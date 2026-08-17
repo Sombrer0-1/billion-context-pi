@@ -13,6 +13,7 @@ import { DensityEstimator } from "./density.js";
 import { entriesToCoreMessages, extractText, matchesStoredText, messageIdentity, messageRef } from "./messages.js";
 import { SessionStateStore, type LiveRefOrigin } from "./state.js";
 import { loadUserConfig, applyUserConfig } from "./user-config.js";
+import { ThrottleEpisode } from "./throttle-retry.js";
 import { logInfo, logWarn, setDebugEnabled } from "./log.js";
 import { findUniqueLongestRun, type MatchRange } from "./sequence-match.js";
 // pi exposes `sessionManager.buildContextEntries()`; omp (oh-my-pi) only has
@@ -39,6 +40,9 @@ export function isPiHost(sm: ExtensionContext["sessionManager"]): boolean {
 
 export interface AcpRuntime {
   core: CompressionCore;
+  /** Per-session provider-throttle retry episode (attempt budget + kick
+   *  pacing). Reset on session_start and on any real progress / user input. */
+  throttle: ThrottleEpisode;
   store: SessionStateStore;
   density: DensityEstimator;
   /** 设置 countTokens 闭包使用的 modelId（每轮 context 事件调用）。 */
@@ -218,6 +222,7 @@ export function createRuntime(adapter: AdapterConfig): AcpRuntime {
   let lastUserConfigKey: string | undefined;
   let promptsRef: Prompts = defaultPrompts;
   const nudgeShownTurns = new Set<string>();
+  const throttle = new ThrottleEpisode();
 
   async function acquireLock(sid: string): Promise<() => void> {
     const prev = locks.get(sid) ?? Promise.resolve();
@@ -304,4 +309,4 @@ export function createRuntime(adapter: AdapterConfig): AcpRuntime {
     lastActiveBlockIds.delete(sid);
   }
 
-  return { core, store, density, setCountModel: (m) => { countModelId = m; }, noteActiveBlocks, clearSessionTracking, get adapter() { return adapterRef; }, get prompts() { return promptsRef; }, setPrompts: (p) => { promptsRef = p; }, markNudgeShown: (k) => { nudgeShownTurns.add(k); }, nudgeShownFor: (k) => nudgeShownTurns.has(k), clearNudgeTracking: () => { nudgeShownTurns.clear(); }, liveContextLimit, configFor, reloadConfig, stateFor, save, acquireLock };}
+  return { core, store, density, throttle, setCountModel: (m) => { countModelId = m; }, noteActiveBlocks, clearSessionTracking, get adapter() { return adapterRef; }, get prompts() { return promptsRef; }, setPrompts: (p) => { promptsRef = p; }, markNudgeShown: (k) => { nudgeShownTurns.add(k); }, nudgeShownFor: (k) => nudgeShownTurns.has(k), clearNudgeTracking: () => { nudgeShownTurns.clear(); }, liveContextLimit, configFor, reloadConfig, stateFor, save, acquireLock };}
