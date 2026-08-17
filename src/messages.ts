@@ -1,5 +1,6 @@
 import type { SessionEntry, SessionMessageEntry } from "@earendil-works/pi-coding-agent";
 import type { CoreMessage } from "acp-kernel";
+import { rewriteTagTokens } from "./tag-tokens.js";
 
 type AgentMessage = SessionMessageEntry["message"];
 
@@ -274,15 +275,23 @@ function reconstructToolCallMessage(
   });
 
   const peeled = peelRefTagBlocks(filtered);
+  const stableTag = rewriteTagTokens(tag, coreBodyOf(firstCore.text ?? "", tag));
   const lastTextIdx = [...peeled].reverse().findIndex((b) => (b as { type?: string }).type === "text");
   if (lastTextIdx >= 0) {
     const idx = peeled.length - 1 - lastTextIdx;
     const lastBlock = peeled[idx] as { type: string; text: string };
     const baseText = lastBlock.text ?? "";
-    peeled[idx] = { ...lastBlock, text: baseText.length > 0 ? `${baseText}\n\n${tag}` : tag };
+    peeled[idx] = { ...lastBlock, text: baseText.length > 0 ? `${baseText}\n\n${stableTag}` : stableTag };
     return { ...(original as object), content: peeled } as AgentMessage;
   }
-  return { ...(original as object), content: [{ type: "text", text: tag }, ...peeled] } as AgentMessage;
+  return { ...(original as object), content: [{ type: "text", text: stableTag }, ...peeled] } as AgentMessage;
+}
+
+function coreBodyOf(coreText: string, tag: string): string {
+  const tagCore = tag.replace(/\s+$/, "");
+  let bodyStart = tagCore.length;
+  if (coreText.charAt(bodyStart) === "\n") bodyStart += 1;
+  return coreText.slice(bodyStart);
 }
 
 function patchRefTag(original: AgentMessage, core: CoreMessage): AgentMessage {
@@ -297,15 +306,13 @@ function patchRefTag(original: AgentMessage, core: CoreMessage): AgentMessage {
   // Honor kernel body mutations (emergency truncation of large tool-results,
   // future rewrites): if core.text's body differs from the original text,
   // rebuild from the kernel body — otherwise truncation never reaches the model.
-  const tagCore = tag.replace(/\s+$/, "");
-  let bodyStart = tagCore.length;
-  if (core.text && core.text.charAt(bodyStart) === "\n") bodyStart += 1;
-  const coreBody = core.text ? core.text.slice(bodyStart) : "";
+  const coreBody = coreBodyOf(core.text ?? "", tag);
   const originalBody = extractText(base.content);
   const trimEnd = (s: string): string => s.replace(/\s+$/, "");
   if (coreBody && trimEnd(coreBody) !== trimEnd(originalBody)) {
-    return rebuildBodyFromCore(original, coreBody, tag);
+    return rebuildBodyFromCore(original, coreBody, rewriteTagTokens(tag, coreBody));
   }
+  const stableTag = rewriteTagTokens(tag, originalBody);
   const rawBlocks = Array.isArray(base.content)
     ? base.content
     : typeof base.content === "string"
@@ -319,7 +326,7 @@ function patchRefTag(original: AgentMessage, core: CoreMessage): AgentMessage {
     const b = newBlocks[i] as { type?: string; text?: string };
     if (b?.type === "text" && typeof b.text === "string" && b.text.length > 0) {
       const baseText = b.text.replace(/\n*$/, "");
-      newBlocks[i] = { ...b, text: `${baseText}\n\n${tag}` };
+      newBlocks[i] = { ...b, text: `${baseText}\n\n${stableTag}` };
       injected = true;
       break;
     }
@@ -330,7 +337,7 @@ function patchRefTag(original: AgentMessage, core: CoreMessage): AgentMessage {
 
   return {
     ...(original as object),
-    content: [...peeled, { type: "text" as const, text: tag }],
+    content: [...peeled, { type: "text" as const, text: stableTag }],
   } as AgentMessage;
 }
 
