@@ -14,7 +14,7 @@ import { makeSearchTool } from "./search-tool.js";
 import { makeStatusTool } from "./status-tool.js";
 import { makeDelegateTool, makeDelegateWaitTool, makeDelegateCancelTool, runningRunsSnapshot, resetDelegateUsage, setDelegateDisplayUsage } from "./delegate-tool.js";
 import { makeCommands } from "./commands.js";
-import { coreOutToAgentMessages } from "./messages.js";
+import { coreOutToAgentMessages, extractText } from "./messages.js";
 import { viableRanges } from "billion-context-kit";
 import { buildAcpSystemPrompt, ACP_DELEGATE_PROMPT } from "./system-prompt.js";
 import { delegateStatusWidget } from "./fleet-widget.js";
@@ -134,11 +134,14 @@ function wireContextTransform(pi: ExtensionAPI, runtime: AcpRuntime): void {
       // (see overflow-selfheal). If it is smaller than what we resolved this
       // turn (e.g. the 150k fallback for an unknown model), re-center the kernel
       // on it so the nudge/truncate bands sit below the real limit, not above it.
-      // Spread into a new object — never mutate the shared resolved config.
+      // Learned per MODEL: switching to a bigger model mid-session must not
+      // inherit the smaller model's learned limit. Spread into a new object —
+      // never mutate the shared resolved config.
       let config = configBase;
-      if (ov.learnedWindow && ov.learnedWindow > 0 && ov.learnedWindow < config.modelContextLimit) {
-        config = { ...config, modelContextLimit: ov.learnedWindow };
-        logInfo("overflow-selfheal", { sid, event: "window-recenter", resolved: configBase.modelContextLimit, learned: ov.learnedWindow });
+      const learnedWindow = ov.learnedWindowFor(modelId);
+      if (learnedWindow && learnedWindow > 0 && learnedWindow < config.modelContextLimit) {
+        config = { ...config, modelContextLimit: learnedWindow };
+        logInfo("overflow-selfheal", { sid, modelId, event: "window-recenter", resolved: configBase.modelContextLimit, learned: learnedWindow });
       }
       // Output headroom: reserve the model's max output budget from the window
       // so the kernel's nudge/truncate bands sit below (window - maxTokens) —
@@ -338,13 +341,19 @@ function wireOverflowSelfHeal(pi: ExtensionAPI, runtime: AcpRuntime): void {
     const msg = event.message;
     if (msg.role !== "assistant") return;
     if (msg.stopReason !== "error") return;
-    const info = inspectOverflowMessage(msg.errorMessage);
+    // Haystack = errorMessage + error content: some relays put the upstream
+    // error body in the streamed content and leave errorMessage generic
+    // ("Provider finish_reason: error_finish") — errorMessage alone would miss
+    // them. (Same haystack approach as isThrottleError.)
+    const haystack = `${msg.errorMessage ?? ""}\n${extractText(msg.content)}`;
+    const info = inspectOverflowMessage(haystack);
     if (!info.isOverflow) return;
     const sid = ctx.sessionManager.getSessionId();
+    const modelId = (ctx.model as { id?: string } | undefined)?.id ?? "default";
     const ov = runtime.overflowFor(sid);
-    if (info.window) ov.learnedWindow = info.window;
+    if (info.window) ov.setLearnedWindow(modelId, info.window);
     ov.armed = true;
-    logWarn("overflow-selfheal", { sid, event: "detected", window: info.window ?? null, message: info.message.slice(0, 200) });
+    logWarn("overflow-selfheal", { sid, modelId, event: "detected", window: info.window ?? null, message: info.message.slice(0, 200) });
     if (ctx.hasUI) ctx.ui.notify(`[ACP] context overflow detected${info.window ? ` (window ${info.window})` : ""} — forcing emergency compression next turn`);
   });
   pi.on("session_shutdown", (_event, ctx) => {

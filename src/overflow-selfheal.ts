@@ -25,7 +25,7 @@
 // "too many tokens" throttle (a 429, handled by throttle-retry) — only
 // genuine context-length errors.
 export const OVERFLOW_MARKER =
-  /prompt is too long|prompt_too_long|prompt_is_too_long|request_too_large|exceeds the context window|exceeds the (maximum |model['’]s )?limit|maximum context length|max context length|context length exceeded|context[_ ]length[_ ]exceeded|exceeded model token limit|input token count.*exceeds|reduce the length of the messages|token limit exceeded/i;
+  /prompt is too long|prompt_too_long|prompt_is_too_long|request_too_large|exceeds the context window|exceeds the (maximum |model['’]s )?limit|maximum context length|maximum context size|max context length|context length exceeded|context[_ ]length[_ ]exceeded|exceeded model token limit|input token count.*exceeds|reduce the length of the messages|token limit exceeded/i;
 
 export interface OverflowInfo {
   isOverflow: boolean;
@@ -49,6 +49,11 @@ function parseOverflowWindow(text: string): number | undefined {
   if (m) return toTokenNumber(m[1]);
   // OpenAI: "maximum context length is 128000 tokens"
   m = /maximum context length is (\d[\d,]*)/i.exec(text);
+  if (m) return toTokenNumber(m[1]);
+  // OpenAI Responses (newer phrasing): "exceeds the model's maximum context
+  // size of 128000 tokens" — must be parsed too, or the learned window stays
+  // unknown for /responses relays.
+  m = /maximum context size (?:is|of) (\d[\d,]*)/i.exec(text);
   if (m) return toTokenNumber(m[1]);
   // "...exceeds the model's maximum of N tokens" / "limit of N tokens"
   m = /(?:maximum|limit) of (\d[\d,]*)\s*(?:input\s+)?tokens/i.exec(text);
@@ -88,12 +93,23 @@ export function reserveOutputHeadroom(window: number, maxOutput: number): number
 // sessions in one extension instance cannot share a learned window or an
 // armed emergency (same rationale as the throttle episode).
 export class OverflowEpisode {
-  /** Real window learned from an overflow error (null until learned). */
-  learnedWindow: number | null = null;
-  /** When true, the next context event forces usage >=95% (emergency). */
+  /** Real windows learned from overflow errors, keyed by model id. A learned
+   *  window is model-specific: switching to a bigger model mid-session must
+   *  not inherit the smaller model's learned limit (that would re-center the
+   *  bands below the new model's real window → premature compression). */
+  private learned = new Map<string, number>();
+  learnedWindowFor(modelId: string): number | null {
+    return this.learned.get(modelId) ?? null;
+  }
+  setLearnedWindow(modelId: string, window: number): void {
+    this.learned.set(modelId, window);
+  }
+  /** When true, the next context event forces usage >=95% (emergency). Kept
+   *  session-scoped (not per-model): the context did not shrink, so the next
+   *  turn needs the emergency regardless of which model answers it. */
   armed = false;
   reset(): void {
-    this.learnedWindow = null;
+    this.learned.clear();
     this.armed = false;
   }
 }

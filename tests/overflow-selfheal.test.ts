@@ -29,6 +29,18 @@ test("inspectOverflowMessage: 'limit of N tokens' form", () => {
   assert.equal(info.window, 64000);
 });
 
+test("inspectOverflowMessage: OpenAI Responses 'maximum context size of N' phrasing", () => {
+  // The newer Responses-API phrasing (the chat-completions one says
+  // "maximum context LENGTH is") — must be detected AND parsed, or self-heal
+  // learns no window for /responses relays.
+  const info = inspectOverflowMessage(
+    "This request's total token count is 130000, which exceeds the model's maximum context size of 128000 tokens.",
+  );
+  assert.equal(info.isOverflow, true);
+  assert.equal(info.window, 128000);
+  assert.equal(inspectOverflowMessage("maximum context size is 128,000").window, 128000);
+});
+
 test("inspectOverflowMessage: overflow without a stated window → window undefined", () => {
   const info = inspectOverflowMessage("prompt is too long, please shorten the conversation");
   assert.equal(info.isOverflow, true);
@@ -67,15 +79,30 @@ test("inspectOverflowMessage: rejects a sub-1000 'window' (not a real context li
 
 test("OverflowEpisode: initial state + reset", () => {
   const ep = new OverflowEpisode();
-  assert.equal(ep.learnedWindow, null);
+  assert.equal(ep.learnedWindowFor("m1"), null);
   assert.equal(ep.armed, false);
-  ep.learnedWindow = 100000;
+  ep.setLearnedWindow("m1", 100000);
   ep.armed = true;
-  assert.equal(ep.learnedWindow, 100000);
+  assert.equal(ep.learnedWindowFor("m1"), 100000);
   assert.equal(ep.armed, true);
   ep.reset();
-  assert.equal(ep.learnedWindow, null);
+  assert.equal(ep.learnedWindowFor("m1"), null);
   assert.equal(ep.armed, false);
+});
+
+test("OverflowEpisode: learned windows are per-model (no cross-model crosstalk)", () => {
+  // The footgun this PR fixes, in the reverse direction: an overflow on a
+  // SMALL model must not keep capping a BIGGER model the user switches to
+  // mid-session (the bands would sit far below the new model's real window).
+  const ep = new OverflowEpisode();
+  ep.setLearnedWindow("small-model", 100000);
+  assert.equal(ep.learnedWindowFor("small-model"), 100000);
+  assert.equal(ep.learnedWindowFor("big-model"), null, "other models unaffected");
+  ep.setLearnedWindow("big-model", 200000);
+  assert.equal(ep.learnedWindowFor("small-model"), 100000, "first model kept");
+  assert.equal(ep.learnedWindowFor("big-model"), 200000);
+  ep.setLearnedWindow("small-model", 90000);
+  assert.equal(ep.learnedWindowFor("small-model"), 90000, "re-learned window overwrites");
 });
 
 test("reserveOutputHeadroom: reserves the output budget from the window", () => {
