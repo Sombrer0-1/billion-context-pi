@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { inspectOverflowMessage, OverflowEpisode, OVERFLOW_MARKER } from "../src/overflow-selfheal.js";
+import { inspectOverflowMessage, OverflowEpisode, OVERFLOW_MARKER, reserveOutputHeadroom } from "../src/overflow-selfheal.js";
 
 test("inspectOverflowMessage: detects OpenAI context-overflow + parses window", () => {
   const info = inspectOverflowMessage(
@@ -76,6 +76,29 @@ test("OverflowEpisode: initial state + reset", () => {
   ep.reset();
   assert.equal(ep.learnedWindow, null);
   assert.equal(ep.armed, false);
+});
+
+test("reserveOutputHeadroom: reserves the output budget from the window", () => {
+  assert.equal(reserveOutputHeadroom(100_000, 16_384), 83_616);
+  assert.equal(reserveOutputHeadroom(128_000, 1), 127_999);
+});
+
+test("reserveOutputHeadroom: no-op for unusable maxOutput", () => {
+  assert.equal(reserveOutputHeadroom(100_000, 0), 100_000);
+  assert.equal(reserveOutputHeadroom(100_000, -5), 100_000);
+  assert.equal(reserveOutputHeadroom(100_000, Number.NaN), 100_000);
+  assert.equal(reserveOutputHeadroom(100_000, Number.POSITIVE_INFINITY), 100_000);
+});
+
+test("reserveOutputHeadroom: no-op when maxOutput >= window (degenerate request)", () => {
+  assert.equal(reserveOutputHeadroom(100_000, 100_000), 100_000);
+  assert.equal(reserveOutputHeadroom(100_000, 200_000), 100_000);
+});
+
+test("reserveOutputHeadroom: no-op for unusable window", () => {
+  assert.equal(reserveOutputHeadroom(0, 10_000), 0);
+  assert.equal(reserveOutputHeadroom(-1, 10_000), -1);
+  assert.equal(reserveOutputHeadroom(Number.NaN, 10_000), Number.NaN);
 });
 
 test("OVERFLOW_MARKER: case-insensitive and matches the shared guard patterns", () => {

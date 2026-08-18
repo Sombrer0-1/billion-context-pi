@@ -62,6 +62,28 @@ function toTokenNumber(raw: string | undefined): number | undefined {
   return Number.isFinite(n) && n >= 1000 ? n : undefined;
 }
 
+/**
+ * Reserve the model's output budget from the context window, so the kernel's
+ * nudge/truncate bands sit below (window - maxOutput) and the context always
+ * leaves room for the model's reply. This prevents the "context + output >
+ * window" overflow on a small window (agents routinely set a large max output).
+ * Returns the window unchanged when maxOutput is not usable (non-positive,
+ * non-finite, or >= window — a maxOutput >= window request is degenerate and is
+ * left to the overflow self-heal).
+ */
+export function reserveOutputHeadroom(window: number, maxOutput: number): number {
+  if (
+    Number.isFinite(window) &&
+    window > 0 &&
+    Number.isFinite(maxOutput) &&
+    maxOutput > 0 &&
+    maxOutput < window
+  ) {
+    return window - maxOutput;
+  }
+  return window;
+}
+
 // Per-session overflow self-heal state. Keyed by session id so concurrent
 // sessions in one extension instance cannot share a learned window or an
 // armed emergency (same rationale as the throttle episode).

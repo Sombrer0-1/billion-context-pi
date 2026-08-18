@@ -25,7 +25,7 @@ import { checkForUpdate } from "./update.js";
 import { runSetupAndNotify } from "./setup-subagent-tools.js";
 import { defaultCountTokens } from "acp-kernel";
 import { formatSystemPromptForEvent, getSystemPromptText } from "./compat.js";
-import { inspectOverflowMessage } from "./overflow-selfheal.js";
+import { inspectOverflowMessage, reserveOutputHeadroom } from "./overflow-selfheal.js";
 
 type AgentMessage = SessionMessageEntry["message"];
 
@@ -139,6 +139,19 @@ function wireContextTransform(pi: ExtensionAPI, runtime: AcpRuntime): void {
       if (ov.learnedWindow && ov.learnedWindow > 0 && ov.learnedWindow < config.modelContextLimit) {
         config = { ...config, modelContextLimit: ov.learnedWindow };
         logInfo("overflow-selfheal", { sid, event: "window-recenter", resolved: configBase.modelContextLimit, learned: ov.learnedWindow });
+      }
+      // Output headroom: reserve the model's max output budget from the window
+      // so the kernel's nudge/truncate bands sit below (window - maxTokens) —
+      // the context then always leaves room for the model's reply, preventing
+      // the "context + output > window" overflow on a small window. maxTokens is
+      // the model's max output capability (ctx.model.maxTokens). Applied to the
+      // (possibly re-centered) window above; never mutates the shared config.
+      const maxOutput = (ctx.model as { maxTokens?: number } | undefined)?.maxTokens ?? 0;
+      const reservedWindow = reserveOutputHeadroom(config.modelContextLimit, maxOutput);
+      if (reservedWindow !== config.modelContextLimit) {
+        const before = config.modelContextLimit;
+        config = { ...config, modelContextLimit: reservedWindow };
+        logInfo("overflow-selfheal", { sid, event: "output-headroom", before, after: reservedWindow, maxOutput });
       }
       const coveredIds = collectCoveredMessageIds(state);
       // Nudge arbitration on the SENT-VIEW scale: chars/4 estimate over the
