@@ -41,8 +41,10 @@ export function isPiHost(sm: ExtensionContext["sessionManager"]): boolean {
 export interface AcpRuntime {
   core: CompressionCore;
   /** Per-session provider-throttle retry episode (attempt budget + kick
-   *  pacing). Reset on session_start and on any real progress / user input. */
-  throttle: ThrottleEpisode;
+   *  pacing), keyed by session id so concurrent sessions in one extension
+   *  instance cannot share an episode. Reset on session_start and on any
+   *  real progress / user input. */
+  throttleFor: (sid: string) => ThrottleEpisode;
   store: SessionStateStore;
   density: DensityEstimator;
   /** 设置 countTokens 闭包使用的 modelId（每轮 context 事件调用）。 */
@@ -222,7 +224,12 @@ export function createRuntime(adapter: AdapterConfig): AcpRuntime {
   let lastUserConfigKey: string | undefined;
   let promptsRef: Prompts = defaultPrompts;
   const nudgeShownTurns = new Set<string>();
-  const throttle = new ThrottleEpisode();
+  const throttleEpisodes = new Map<string, ThrottleEpisode>();
+  function throttleFor(sid: string): ThrottleEpisode {
+    let ep = throttleEpisodes.get(sid);
+    if (!ep) { ep = new ThrottleEpisode(); throttleEpisodes.set(sid, ep); }
+    return ep;
+  }
 
   async function acquireLock(sid: string): Promise<() => void> {
     const prev = locks.get(sid) ?? Promise.resolve();
@@ -309,4 +316,4 @@ export function createRuntime(adapter: AdapterConfig): AcpRuntime {
     lastActiveBlockIds.delete(sid);
   }
 
-  return { core, store, density, throttle, setCountModel: (m) => { countModelId = m; }, noteActiveBlocks, clearSessionTracking, get adapter() { return adapterRef; }, get prompts() { return promptsRef; }, setPrompts: (p) => { promptsRef = p; }, markNudgeShown: (k) => { nudgeShownTurns.add(k); }, nudgeShownFor: (k) => nudgeShownTurns.has(k), clearNudgeTracking: () => { nudgeShownTurns.clear(); }, liveContextLimit, configFor, reloadConfig, stateFor, save, acquireLock };}
+  return { core, store, density, throttleFor, setCountModel: (m) => { countModelId = m; }, noteActiveBlocks, clearSessionTracking, get adapter() { return adapterRef; }, get prompts() { return promptsRef; }, setPrompts: (p) => { promptsRef = p; }, markNudgeShown: (k) => { nudgeShownTurns.add(k); }, nudgeShownFor: (k) => nudgeShownTurns.has(k), clearNudgeTracking: () => { nudgeShownTurns.clear(); }, liveContextLimit, configFor, reloadConfig, stateFor, save, acquireLock };}

@@ -74,7 +74,7 @@ function wireSessionLifecycle(pi: ExtensionAPI, runtime: AcpRuntime): void {
   pi.on("session_start", async (_event, ctx) => {
     runtime.store.invalidate();
     runtime.clearNudgeTracking();
-    runtime.throttle.reset();
+    runtime.throttleFor(ctx.sessionManager.getSessionId()).reset();
     // 新会话重置该模型的密度校准（文档 §5.3：模型/窗口切换时重新收敛）
     const modelId = (ctx.model as { id?: string } | undefined)?.id ?? "default";
     runtime.density.resetModel(modelId);
@@ -314,60 +314,62 @@ function wireSystemPrompt(pi: ExtensionAPI, runtime: AcpRuntime): void {
 //     context and the system-prompt line guides the model to resume.
 function wireThrottleRetry(pi: ExtensionAPI, runtime: AcpRuntime): void {
   pi.on("message_end", (event, ctx) => {
+    const th = runtime.throttleFor(ctx.sessionManager.getSessionId());
     const msg = event.message;
     if (msg.role === "user") {
-      runtime.throttle.onUserMessage(isKickMessage(msg));
+      th.onUserMessage(isKickMessage(msg));
       return;
     }
     if (msg.role !== "assistant") return;
     if (msg.stopReason !== "error") {
-      runtime.throttle.onProgress();
+      th.onProgress();
       return;
     }
     if (!isThrottleError(msg)) {
-      runtime.throttle.onNonThrottleError();
+      th.onNonThrottleError();
       return;
     }
     const cfg = resolveThrottleRetry(runtime.adapter.throttleRetry);
     if (!cfg.enabled) {
-      runtime.throttle.onNonThrottleError();
+      th.onNonThrottleError();
       return;
     }
-    const decision = runtime.throttle.onThrottleError(cfg.maxRetries);
+    const decision = th.onThrottleError(cfg.maxRetries);
     if (decision === "exhausted") {
       logWarn("throttle-retry", { sid: ctx.sessionManager.getSessionId(), event: "budget-exhausted", max: cfg.maxRetries });
       if (ctx.hasUI) ctx.ui.notify(`[ACP] provider throttled — retry budget exhausted (${cfg.maxRetries}); surfacing error`);
       return;
     }
-    logInfo("throttle-retry", { sid: ctx.sessionManager.getSessionId(), event: "rewrite", attempt: runtime.throttle.state.attempts, max: cfg.maxRetries, path: "native" });
-    if (ctx.hasUI) ctx.ui.notify(`[ACP] provider throttled — retry ${runtime.throttle.state.attempts}/${cfg.maxRetries} (fast probe)`);
+    logInfo("throttle-retry", { sid: ctx.sessionManager.getSessionId(), event: "rewrite", attempt: th.state.attempts, max: cfg.maxRetries, path: "native" });
+    if (ctx.hasUI) ctx.ui.notify(`[ACP] provider throttled — retry ${th.state.attempts}/${cfg.maxRetries} (fast probe)`);
     return { message: { ...msg, errorMessage: THROTTLE_RETRY_ERROR_MESSAGE } };
   });
   pi.on("agent_settled", async (_event, ctx) => {
+    const th = runtime.throttleFor(ctx.sessionManager.getSessionId());
     const cfg = resolveThrottleRetry(runtime.adapter.throttleRetry);
-    if (!cfg.enabled || !runtime.throttle.readyToKick(cfg.maxRetries)) return;
-    const kickNumber = runtime.throttle.state.kicks + 1;
+    if (!cfg.enabled || !th.readyToKick(cfg.maxRetries)) return;
+    const kickNumber = th.state.kicks + 1;
     const delayMs = throttleDelayMs(kickNumber, cfg);
-    runtime.throttle.onKickStarted();
+    th.onKickStarted();
     const sid = ctx.sessionManager.getSessionId();
     logInfo("throttle-retry", { sid, event: "kick-sleep", kickNumber, delayMs });
-    if (ctx.hasUI) ctx.ui.notify(`[ACP] provider throttled — waiting ${Math.round(delayMs / 1000)}s before retry ${runtime.throttle.state.attempts + 1}/${cfg.maxRetries}`);
-    const result = await abortableSleep(delayMs, runtime.throttle.sleepController().signal);
+    if (ctx.hasUI) ctx.ui.notify(`[ACP] provider throttled — waiting ${Math.round(delayMs / 1000)}s before retry ${th.state.attempts + 1}/${cfg.maxRetries}`);
+    const result = await abortableSleep(delayMs, th.sleepController().signal);
     if (result === "aborted") {
-      runtime.throttle.onKickCancelled();
+      th.onKickCancelled();
       logInfo("throttle-retry", { sid, event: "kick-cancelled", kickNumber });
       if (ctx.hasUI) ctx.ui.notify("[ACP] throttle retry cancelled (user input received)");
       return;
     }
-    if (!runtime.throttle.readyToKick(cfg.maxRetries)) return;
+    if (!th.readyToKick(cfg.maxRetries)) return;
     pi.sendUserMessage(THROTTLE_KICK_TEXT);
-    logInfo("throttle-retry", { sid, event: "kick-sent", kickNumber, attempt: runtime.throttle.state.attempts + 1, max: cfg.maxRetries });
+    logInfo("throttle-retry", { sid, event: "kick-sent", kickNumber, attempt: th.state.attempts + 1, max: cfg.maxRetries });
   });
-  pi.on("input", (event) => {
-    if (event.source !== "extension") runtime.throttle.cancelSleep();
+  pi.on("input", (event, ctx) => {
+    if (event.source !== "extension") runtime.throttleFor(ctx.sessionManager.getSessionId()).cancelSleep();
   });
-  pi.on("session_shutdown", () => {
-    runtime.throttle.reset();
+  pi.on("session_shutdown", (_event, ctx) => {
+    runtime.throttleFor(ctx.sessionManager.getSessionId()).reset();
   });
 }
 

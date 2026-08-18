@@ -217,6 +217,11 @@ test("abortableSleep: abort mid-sleep returns aborted promptly", async () => {
 
 // Mirrors of the pi-ai patterns that the rewritten errorMessage must satisfy
 // (pi-ai is not importable here: zero-runtime-deps constraint).
+// These are COPIES of pi-ai's retry/overflow classifier (isRetryableAssistantError
+// + context-overflow detection) as shipped in pi-stable 0.83.5 (2026-08-18). If
+// pi-ai changes any of these patterns, update BOTH the mirrors below AND the
+// THROTTLE_RETRY_ERROR_MESSAGE string so the rewrite keeps the native-retryable
+// classification — the asserts at the bottom of this file pin that contract.
 const NON_RETRYABLE = new RegExp(["GoUsageLimitError", "FreeUsageLimitError", "Monthly usage limit reached", "available balance", "insufficient_quota", "out of budget", "quota exceeded", "billing"].join("|"), "i");
 const RETRYABLE = new RegExp(["overloaded", "rate.?limit", "too many requests", "429", "500", "502", "503", "504", "524", "service.?unavailable", "server.?error", "internal.?error", "provider.?returned.?error"].join("|"), "i");
 const OVERFLOW = [/prompt is too long/i, /request_too_large/i, /exceeds the context window/i, /exceeded model token limit/i, /context[_ ]length[_ ]exceeded/i, /too many tokens/i, /token limit exceeded/i];
