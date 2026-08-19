@@ -13,6 +13,7 @@ import { DensityEstimator } from "./density.js";
 import { entriesToCoreMessages, extractText, matchesStoredText, messageIdentity, messageRef } from "./messages.js";
 import { SessionStateStore, type LiveRefOrigin } from "./state.js";
 import { loadUserConfig, applyUserConfig } from "./user-config.js";
+import { ThrottleEpisode } from "./throttle-retry.js";
 import { logInfo, logWarn, setDebugEnabled } from "./log.js";
 import { findUniqueLongestRun, type MatchRange } from "./sequence-match.js";
 import { OverflowEpisode } from "./overflow-selfheal.js";
@@ -40,6 +41,15 @@ export function isPiHost(sm: ExtensionContext["sessionManager"]): boolean {
 
 export interface AcpRuntime {
   core: CompressionCore;
+  /** Per-session provider-throttle retry episode (attempt budget + kick
+   *  pacing), keyed by session id so concurrent sessions in one extension
+   *  instance cannot share an episode. Reset on session_start and on any
+   *  real progress / user input. */
+  throttleFor: (sid: string) => ThrottleEpisode;
+  /** Drop a session's throttle episode entirely (session_shutdown): aborts a
+   *  pending kick sleep and releases the map entry so a long-lived process
+   *  that cycles through many sessions doesn't accumulate them. */
+  throttleDrop: (sid: string) => void;
   store: SessionStateStore;
   density: DensityEstimator;
   /** 设置 countTokens 闭包使用的 modelId（每轮 context 事件调用）。 */
@@ -237,6 +247,18 @@ export function createRuntime(adapter: AdapterConfig): AcpRuntime {
     overflowEpisodes.delete(sid);
   }
 
+  const throttleEpisodes = new Map<string, ThrottleEpisode>();
+  function throttleFor(sid: string): ThrottleEpisode {
+    let ep = throttleEpisodes.get(sid);
+    if (!ep) { ep = new ThrottleEpisode(); throttleEpisodes.set(sid, ep); }
+    return ep;
+  }
+  function throttleDrop(sid: string): void {
+    const ep = throttleEpisodes.get(sid);
+    if (ep) ep.reset(); // abort a pending kick sleep before releasing the entry
+    throttleEpisodes.delete(sid);
+  }
+
   async function acquireLock(sid: string): Promise<() => void> {
     const prev = locks.get(sid) ?? Promise.resolve();
     let release!: () => void;
@@ -322,4 +344,4 @@ export function createRuntime(adapter: AdapterConfig): AcpRuntime {
     lastActiveBlockIds.delete(sid);
   }
 
-  return { core, store, density, setCountModel: (m) => { countModelId = m; }, noteActiveBlocks, clearSessionTracking, get adapter() { return adapterRef; }, get prompts() { return promptsRef; }, setPrompts: (p) => { promptsRef = p; }, markNudgeShown: (k) => { nudgeShownTurns.add(k); }, nudgeShownFor: (k) => nudgeShownTurns.has(k), clearNudgeTracking: () => { nudgeShownTurns.clear(); }, liveContextLimit, configFor, reloadConfig, stateFor, save, acquireLock, overflowFor, overflowDrop };}
+  return { core, store, density, setCountModel: (m) => { countModelId = m; }, noteActiveBlocks, clearSessionTracking, get adapter() { return adapterRef; }, get prompts() { return promptsRef; }, setPrompts: (p) => { promptsRef = p; }, markNudgeShown: (k) => { nudgeShownTurns.add(k); }, nudgeShownFor: (k) => nudgeShownTurns.has(k), clearNudgeTracking: () => { nudgeShownTurns.clear(); }, liveContextLimit, configFor, reloadConfig, stateFor, save, acquireLock, overflowFor, overflowDrop, throttleFor, throttleDrop };}

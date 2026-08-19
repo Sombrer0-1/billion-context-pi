@@ -1,4 +1,5 @@
 import { defaultConfig, type Config, type Prompts } from "acp-kernel";
+import type { ThrottleRetryConfig } from "./throttle-retry.js";
 
 /** Delegate sub-agent configuration. */
 export interface DelegateConfig {
@@ -93,6 +94,11 @@ export interface AdapterConfig {
   delegate?: boolean | DelegateConfig;
   /** Compression tuning. */
   compress?: CompressConfig;
+  /** Provider token-throttle (Bedrock "Too many tokens, please wait before
+   *  trying again.") auto-retry. Accepts a boolean shorthand (`false`
+   *  disables) or a ThrottleRetryConfig object. Default: enabled, 10 retries,
+   *  60s exponential base capped at 300s per kick. */
+  throttleRetry?: boolean | ThrottleRetryConfig;
   /** Legacy flat alias for `delegate.displayUsage`. Kept for backward
    *  compatibility with existing acp.json files. Prefer `delegate.displayUsage`. */
   displayUsage?: "merged" | "separate";

@@ -4,6 +4,7 @@ import { homedir } from "node:os";
 import { CONFIG_DIR_NAME } from "@earendil-works/pi-coding-agent";
 import type { Prompts } from "acp-kernel";
 import type { AdapterConfig, CompressConfig, DelegateConfig } from "./config.js";
+import type { ThrottleRetryConfig } from "./throttle-retry.js";
 import { debug, logWarn } from "./log.js";
 
 /** User-facing config keys (subset of AdapterConfig). Loaded from
@@ -17,6 +18,7 @@ export interface UserAcpConfig {
   toolOutputMaxBytes?: number;
   delegate?: boolean | DelegateConfig;
   compress?: CompressConfig;
+  throttleRetry?: boolean | ThrottleRetryConfig;
   displayUsage?: "merged" | "separate";
   prompts?: Partial<Prompts>;
   acknowledgePromptsRisk?: boolean;
@@ -53,7 +55,7 @@ function join(... parts: string[]): string {
 const KNOWN = new Set([
   "debug", "autoUpdate", "modelContextLimit",
   "toolBashDefaultTimeout", "toolOutputMaxBytes",
-  "delegate", "compress", "displayUsage",
+  "delegate", "compress", "displayUsage", "throttleRetry",
   "prompts", "acknowledgePromptsRisk",
 ]);
 

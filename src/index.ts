@@ -23,6 +23,15 @@ import { debug, logError, logInfo, logWarn, logThrow, closeLogStream } from "./l
 import { collectCoveredMessageIds, estimateTokens, lastUserMessageId, calibrateTokens } from "./tokens.js";
 import { checkForUpdate } from "./update.js";
 import { runSetupAndNotify } from "./setup-subagent-tools.js";
+import {
+  THROTTLE_RETRY_ERROR_MESSAGE,
+  THROTTLE_KICK_TEXT,
+  abortableSleep,
+  isKickMessage,
+  isThrottleError,
+  resolveThrottleRetry,
+  throttleDelayMs,
+} from "./throttle-retry.js";
 import { defaultCountTokens } from "acp-kernel";
 import { formatSystemPromptForEvent, getSystemPromptText } from "./compat.js";
 import { inspectOverflowMessage, reserveOutputHeadroom, shouldReserveOutputHeadroom } from "./overflow-selfheal.js";
@@ -40,6 +49,7 @@ export function createAcpExtension(adapter: AdapterConfig = {}): ExtensionFactor
     wireSystemPrompt(pi, runtime);
     wireToolGuardrails(pi, runtime);
     wireOverflowSelfHeal(pi, runtime);
+    wireThrottleRetry(pi, runtime);
     pi.registerTool(makeCompressTool(runtime));
     pi.registerTool(makeDecompressTool(runtime));
     pi.registerTool(makeSearchTool(runtime));
@@ -66,6 +76,7 @@ function wireSessionLifecycle(pi: ExtensionAPI, runtime: AcpRuntime): void {
   pi.on("session_start", async (_event, ctx) => {
     runtime.store.invalidate();
     runtime.clearNudgeTracking();
+    runtime.throttleFor(ctx.sessionManager.getSessionId()).reset();
     // 新会话重置该模型的密度校准（文档 §5.3：模型/窗口切换时重新收敛）
     const modelId = (ctx.model as { id?: string } | undefined)?.id ?? "default";
     runtime.density.resetModel(modelId);
@@ -363,6 +374,83 @@ function wireOverflowSelfHeal(pi: ExtensionAPI, runtime: AcpRuntime): void {
   });
   pi.on("session_shutdown", (_event, ctx) => {
     runtime.overflowDrop(ctx.sessionManager.getSessionId());
+  });
+}
+
+// Bedrock per-minute token-throttle auto-retry (hybrid design):
+//  1. message_end (sync, no sleep): when a finalized assistant message is a
+//     provider throttle error, rewrite its errorMessage to a pi-retryable
+//     form. Pi's native post-run classifier then re-runs the same turn via
+//     agent.continue() (error message removed from LLM state, native TUI
+//     indicator) within its own in-memory budget (default 3).
+//  2. agent_settled: if the run still ended on a rewritten throttle error and
+//     the ACP episode budget remains, ACP sleeps its own progressive delay
+//     (60s exponential base, capped) then pi.sendUserMessage(kick) to resume
+//     the task — covering attempts Pi's in-memory budget refuses.
+//     agent_settled fires in _runAgentPrompt's finally (after all of pi's
+//     retry/compaction/continue decisions) with the agent idle, so the sleep
+//     blocks nothing; ctx.signal is undefined there, so ACP keeps its own
+//     AbortController. Any non-kick user input cancels the pending kick
+//     (input event, source !== "extension"); the throttled error stays in
+//     context and the system-prompt line guides the model to resume.
+function wireThrottleRetry(pi: ExtensionAPI, runtime: AcpRuntime): void {
+  pi.on("message_end", (event, ctx) => {
+    const th = runtime.throttleFor(ctx.sessionManager.getSessionId());
+    const msg = event.message;
+    if (msg.role === "user") {
+      th.onUserMessage(isKickMessage(msg));
+      return;
+    }
+    if (msg.role !== "assistant") return;
+    if (msg.stopReason !== "error") {
+      th.onProgress();
+      return;
+    }
+    if (!isThrottleError(msg)) {
+      th.onNonThrottleError();
+      return;
+    }
+    const cfg = resolveThrottleRetry(runtime.adapter.throttleRetry);
+    if (!cfg.enabled) {
+      th.onNonThrottleError();
+      return;
+    }
+    const decision = th.onThrottleError(cfg.maxRetries);
+    if (decision === "exhausted") {
+      logWarn("throttle-retry", { sid: ctx.sessionManager.getSessionId(), event: "budget-exhausted", max: cfg.maxRetries });
+      if (ctx.hasUI) ctx.ui.notify(`[ACP] provider throttled — retry budget exhausted (${cfg.maxRetries}); surfacing error`);
+      return;
+    }
+    logInfo("throttle-retry", { sid: ctx.sessionManager.getSessionId(), event: "rewrite", attempt: th.state.attempts, max: cfg.maxRetries, path: "native" });
+    if (ctx.hasUI) ctx.ui.notify(`[ACP] provider throttled — retry ${th.state.attempts}/${cfg.maxRetries} (fast probe)`);
+    return { message: { ...msg, errorMessage: THROTTLE_RETRY_ERROR_MESSAGE } };
+  });
+  pi.on("agent_settled", async (_event, ctx) => {
+    const th = runtime.throttleFor(ctx.sessionManager.getSessionId());
+    const cfg = resolveThrottleRetry(runtime.adapter.throttleRetry);
+    if (!cfg.enabled || !th.readyToKick(cfg.maxRetries)) return;
+    const kickNumber = th.state.kicks + 1;
+    const delayMs = throttleDelayMs(kickNumber, cfg);
+    th.onKickStarted();
+    const sid = ctx.sessionManager.getSessionId();
+    logInfo("throttle-retry", { sid, event: "kick-sleep", kickNumber, delayMs });
+    if (ctx.hasUI) ctx.ui.notify(`[ACP] provider throttled — waiting ${Math.round(delayMs / 1000)}s before retry ${th.state.attempts + 1}/${cfg.maxRetries}`);
+    const result = await abortableSleep(delayMs, th.sleepController().signal);
+    if (result === "aborted") {
+      th.onKickCancelled();
+      logInfo("throttle-retry", { sid, event: "kick-cancelled", kickNumber });
+      if (ctx.hasUI) ctx.ui.notify("[ACP] throttle retry cancelled (user input received)");
+      return;
+    }
+    if (!th.readyToKick(cfg.maxRetries)) return;
+    pi.sendUserMessage(THROTTLE_KICK_TEXT);
+    logInfo("throttle-retry", { sid, event: "kick-sent", kickNumber, attempt: th.state.attempts + 1, max: cfg.maxRetries });
+  });
+  pi.on("input", (event, ctx) => {
+    if (event.source !== "extension") runtime.throttleFor(ctx.sessionManager.getSessionId()).cancelSleep();
+  });
+  pi.on("session_shutdown", (_event, ctx) => {
+    runtime.throttleDrop(ctx.sessionManager.getSessionId());
   });
 }
 

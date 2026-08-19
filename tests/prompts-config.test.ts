@@ -73,7 +73,7 @@ test("applyUserConfig flows prompts through to the adapter", () => {
 test("buildAcpSystemPrompt default output is byte-stable (no trailing whitespace, full rules embedded)", () => {
   const prompt = buildAcpSystemPrompt(defaultPrompts);
   assert.ok(
-    prompt.endsWith("the current step no longer needs them.\n"),
+    prompt.endsWith("If the user sends new input during a retry wait, the retry is cancelled.\n"),
     "ends exactly like the master const — const->function refactor must not add trailing whitespace",
   );
   assert.equal(

@@ -62,6 +62,11 @@ decompress restores previously compressed content and writes it to a file by def
 CONTEXT BREAKDOWN
 
 When context usage passes a threshold, the system appends a breakdown showing where tokens are spent. Compress the largest ranges first when the current step no longer needs them.
+
+PROVIDER THROTTLE RETRY
+
+A provider rate-limit error (e.g. "Too many tokens, please wait before trying again.") may appear as a failed assistant response followed by a [ACP:provider-throttle] note. The interruption was transient and the system is retrying automatically. After such an interruption, resume the interrupted step exactly where it left off: do not re-run completed steps, do not re-read content already in context, and do not discuss the interruption unless asked.
+Retries are capped; when the cap is reached the error is surfaced to the user unchanged. If the user sends new input during a retry wait, the retry is cancelled.
 `;
 }
 
