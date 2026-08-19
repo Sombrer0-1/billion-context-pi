@@ -2,6 +2,9 @@
 
 ## Unreleased (master, since v0.1.38)
 
+- **fix(context)**: 上下文窗口自愈 — 上游 overflow 时从错误信息学习真实窗口、重新校准 nudge/truncate 阈值，并预留模型输出 headroom（Anthropic 除外）；下一轮强制 usage≥95% 触发紧急截断（#177）
+- **feat(throttle)**: 自动重试 provider token 限流（Bedrock 429 throttle）— message_end 改写为 429 触发 pi 原生重试 + agent_settled 渐进式 ACP kick（60s→300s 指数退避），用户输入取消、per-session episode、shutdown 清理（#170）
+- test: 出站 provider 视图字节稳定性回归 — 30 轮 context 事件 append-only 字节稳定（29/29 前缀一致），压缩仅改写一次（#175）
 - **fix(cache)**: 标签 `tokens=` 与密度校准解耦 — 发给模型的 `<acp>` 标签恒用 raw `defaultCountTokens`（正文纯函数），density 只保留 nudge/emergency 仲裁；消除快照缺失/会话恢复/密度漂移引起的标签字节漂移与前缀缓存全量失效（61k re-bill 根因，closes #171）(#173)
 - Density calibration (Phase 2 of token calibration) + token-count snapshot: kernel 0.0.24→0.0.27 (`acp-kernel`), `src/density.ts` 累积锚点密度估计器（clamp [0.5,2.5]、Δest≥50、±20% 双轮确认、per-model 隔离、压缩后重锚），`countTokens` 注入 kernel；`tokenSnapshot` 跨重启稳定 `<acp>` 标签数字，修复校准期前缀缓存反复重建（closes #146）(#155)
 - Three-level compress cascade (global > provider > model, per-field deepest-wins): `compress.providers` in acp.json (#145)
