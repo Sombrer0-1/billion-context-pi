@@ -45,6 +45,10 @@ export interface AcpRuntime {
    *  instance cannot share an episode. Reset on session_start and on any
    *  real progress / user input. */
   throttleFor: (sid: string) => ThrottleEpisode;
+  /** Drop a session's throttle episode entirely (session_shutdown): aborts a
+   *  pending kick sleep and releases the map entry so a long-lived process
+   *  that cycles through many sessions doesn't accumulate them. */
+  throttleDrop: (sid: string) => void;
   store: SessionStateStore;
   density: DensityEstimator;
   /** 设置 countTokens 闭包使用的 modelId（每轮 context 事件调用）。 */
@@ -230,6 +234,11 @@ export function createRuntime(adapter: AdapterConfig): AcpRuntime {
     if (!ep) { ep = new ThrottleEpisode(); throttleEpisodes.set(sid, ep); }
     return ep;
   }
+  function throttleDrop(sid: string): void {
+    const ep = throttleEpisodes.get(sid);
+    if (ep) ep.reset(); // abort a pending kick sleep before releasing the entry
+    throttleEpisodes.delete(sid);
+  }
 
   async function acquireLock(sid: string): Promise<() => void> {
     const prev = locks.get(sid) ?? Promise.resolve();
@@ -316,4 +325,4 @@ export function createRuntime(adapter: AdapterConfig): AcpRuntime {
     lastActiveBlockIds.delete(sid);
   }
 
-  return { core, store, density, throttleFor, setCountModel: (m) => { countModelId = m; }, noteActiveBlocks, clearSessionTracking, get adapter() { return adapterRef; }, get prompts() { return promptsRef; }, setPrompts: (p) => { promptsRef = p; }, markNudgeShown: (k) => { nudgeShownTurns.add(k); }, nudgeShownFor: (k) => nudgeShownTurns.has(k), clearNudgeTracking: () => { nudgeShownTurns.clear(); }, liveContextLimit, configFor, reloadConfig, stateFor, save, acquireLock };}
+  return { core, store, density, throttleFor, throttleDrop, setCountModel: (m) => { countModelId = m; }, noteActiveBlocks, clearSessionTracking, get adapter() { return adapterRef; }, get prompts() { return promptsRef; }, setPrompts: (p) => { promptsRef = p; }, markNudgeShown: (k) => { nudgeShownTurns.add(k); }, nudgeShownFor: (k) => nudgeShownTurns.has(k), clearNudgeTracking: () => { nudgeShownTurns.clear(); }, liveContextLimit, configFor, reloadConfig, stateFor, save, acquireLock };}

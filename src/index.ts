@@ -369,7 +369,7 @@ function wireThrottleRetry(pi: ExtensionAPI, runtime: AcpRuntime): void {
     if (event.source !== "extension") runtime.throttleFor(ctx.sessionManager.getSessionId()).cancelSleep();
   });
   pi.on("session_shutdown", (_event, ctx) => {
-    runtime.throttleFor(ctx.sessionManager.getSessionId()).reset();
+    runtime.throttleDrop(ctx.sessionManager.getSessionId());
   });
 }
 
