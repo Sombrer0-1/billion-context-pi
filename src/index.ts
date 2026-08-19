@@ -7,8 +7,8 @@ import type {
 import type { CoreMessage, NudgeDecision, CompressionBlock, Prompts } from "acp-kernel";
 import { renderNudgeText, resolvePrompts, defaultPrompts } from "acp-kernel";
 import { type AdapterConfig, resolveDelegate } from "./config.js";
-import { createRuntime, type AcpRuntime } from "./runtime.js";
-import { makeCompressTool } from "./compress-tool.js";
+import { createRuntime, type AcpRuntime, MAX_COMPRESS_ATTEMPTS } from "./runtime.js";
+import { makeCompressTool, isCompressSuccessText } from "./compress-tool.js";
 import { makeDecompressTool } from "./decompress-tool.js";
 import { makeSearchTool } from "./search-tool.js";
 import { makeStatusTool } from "./status-tool.js";
@@ -77,6 +77,7 @@ function wireSessionLifecycle(pi: ExtensionAPI, runtime: AcpRuntime): void {
     runtime.store.invalidate();
     runtime.clearNudgeTracking();
     runtime.throttleFor(ctx.sessionManager.getSessionId()).reset();
+    runtime.clearCompressRetryTracking();
     // 新会话重置该模型的密度校准（文档 §5.3：模型/窗口切换时重新收敛）
     const modelId = (ctx.model as { id?: string } | undefined)?.id ?? "default";
     runtime.density.resetModel(modelId);
@@ -275,6 +276,8 @@ function wireContextTransform(pi: ExtensionAPI, runtime: AcpRuntime): void {
     const rebuilt = coreOutToAgentMessages(turn.messages, originalById);
     const debugOn = debug.enabled;
 
+    const turnKey = lastUserMessageId(entries) ?? sid;
+
     if (turn.nudge?.shouldInject) {
       // Two independent channels for the nudge:
       //  1. CONTEXT injection (always on): the nudge is appended to the
@@ -294,7 +297,6 @@ function wireContextTransform(pi: ExtensionAPI, runtime: AcpRuntime): void {
       // fragmented range in the list makes batched attempts fail atomically
       // (kernel validates the whole batch). See viableRanges in billion-context-kit.
       turn.nudge.compressibleRanges = viableRanges(turn.nudge.compressibleRanges);
-      const turnKey = lastUserMessageId(entries) ?? sid;
       const alreadyShown = !emergency && runtime.nudgeShownFor(turnKey);
       if (!alreadyShown) {
         rebuilt.push(nudgeMessage(turn.nudge, turn.state.blocks.filter((b) => b.active), runtime.prompts));
@@ -311,6 +313,34 @@ function wireContextTransform(pi: ExtensionAPI, runtime: AcpRuntime): void {
         debug.event("nudge-injected", { sid: ctx.sessionManager.getSessionId(), voice: rendered.voice, channels: ["context", debugOn ? "terminal" : null].filter(Boolean), emergency, turnKey, text: rendered.text + example });
       } else {
         debug.event("nudge-suppressed", { sid: ctx.sessionManager.getSessionId(), turnKey, reason: turn.nudge.reason });
+      }
+    }
+
+    // Failure-triggered compress retry (defense in depth): when the model
+    // ATTEMPTED a compress call and it failed (bad arguments, invalid
+    // boundaries...), the kernel's growth-gated nudge stays silent — the
+    // attempt consumed the turn's nudge budget while nothing got compressed,
+    // and the model often just continues (session 01a00a38: one validation
+    // failure at 11:41Z, then 95 minutes of nudge silence). Re-prompt
+    // IMMEDIATELY after a failure, quoting the error so the failed call is
+    // salient, capped at MAX_COMPRESS_ATTEMPTS per user turn; a successful
+    // compress resets the counter. Only outcomes from the CURRENT user turn
+    // are considered — a stale failure from an earlier turn must never
+    // re-prompt (the user has moved on) and the cap must stay reachable.
+    const compressOutcomes = collectCompressOutcomes(entries, turnStartIndex(entries));
+    if (compressOutcomes.length > 0) {
+      const outcome = runtime.noteCompressOutcomes(turnKey, compressOutcomes);
+      const failed = outcome.retryFor !== null ? compressOutcomes.find((o) => o.toolCallId === outcome.retryFor) : undefined;
+      if (failed) {
+        rebuilt.push(compressRetryMessage(failed.text, outcome.count, MAX_COMPRESS_ATTEMPTS));
+        logWarn("nudge", { sid, event: "compress-retry-inject", attempt: outcome.count, max: MAX_COMPRESS_ATTEMPTS, toolCallId: failed.toolCallId });
+        debug.event("compress-retry-injected", { sid, turnKey, attempt: outcome.count, toolCallId: failed.toolCallId, text: failed.text.slice(0, 200) });
+      } else if (outcome.cappedNow) {
+        logWarn("nudge", { sid, event: "compress-retry-capped", failures: outcome.count });
+        debug.event("compress-retry-capped", { sid, turnKey, failures: outcome.count });
+        if (ctx.hasUI) {
+          ctx.ui.notify(`[ACP] compress failed ${outcome.count}× this turn — retry prompts disabled until the next user message.`);
+        }
       }
     }
 
@@ -470,6 +500,53 @@ function collectOriginals(entries: Array<{ type: string; id: string; message?: A
     }
   }
   return map;
+}
+
+// Index of the last user-role entry — the start of the current turn.
+// Everything strictly AFTER this index belongs to the current turn; -1 when
+// the session has no user message yet.
+function turnStartIndex(entries: Array<{ type: string; message?: { role?: string } }>): number {
+  for (let i = entries.length - 1; i >= 0; i--) {
+    if (entries[i]!.message?.role === "user") return i;
+  }
+  return -1;
+}
+
+// Compress toolResults from the CURRENT user turn only — the raw material for
+// the failure-triggered retry nudge above. Scoping matters: feeding the whole
+// session would keep an old failure as the "newest outcome" forever, and the
+// per-turn counter reset would then re-prompt it with count 0 on every LLM
+// call of every later turn (review finding on 7ddd2c6).
+function collectCompressOutcomes(entries: Array<{ type: string; id: string; message?: AgentMessage }>, startIndex: number): Array<{ toolCallId: string; isError: boolean; success: boolean; text: string }> {
+  const out: Array<{ toolCallId: string; isError: boolean; success: boolean; text: string }> = [];
+  for (let i = Math.max(startIndex, -1) + 1; i < entries.length; i++) {
+    const entry = entries[i]!;
+    if (entry.type !== "message" || !entry.message) continue;
+    const m = entry.message as { role?: string; toolName?: string; toolCallId?: string; isError?: boolean; content?: unknown };
+    if (m.role !== "toolResult" || m.toolName !== "compress" || !m.toolCallId) continue;
+    const text = extractText(m.content);
+    out.push({ toolCallId: m.toolCallId, isError: m.isError === true, success: m.isError !== true && isCompressSuccessText(text), text });
+  }
+  return out;
+}
+
+function compressRetryMessage(errorText: string, attempt: number, maxAttempts: number): AgentMessage {
+  // pi-core validation errors append the full received arguments — huge and
+  // useless as a quote. Keep only the error lines before that dump.
+  const cut = errorText.indexOf("\n\nReceived arguments:");
+  const quote = (cut !== -1 ? errorText.slice(0, cut) : errorText).slice(0, 600);
+  const text = [
+    `[ACP] Your compress call FAILED (attempt ${attempt} of ${maxAttempts}) — nothing was compressed.`,
+    "",
+    quote,
+    "",
+    "The failed tool result is still in context — check it, fix the arguments, and call compress again NOW:",
+    "- content must be an ARRAY of { startId, endId, summary } objects (topic optional) — not a JSON-encoded string.",
+    '- Example: compress({ content: [{ startId: "m00005", endId: "m00080", summary: "..." }] })',
+    '- startId/endId are the mNNNNN refs from the <acp> tags (or block ids like "b3").',
+    attempt >= maxAttempts - 1 ? "- This is your LAST retry for this turn — if it fails again, compression pauses until the next user message." : null,
+  ].filter((l): l is string => l !== null).join("\n");
+  return { role: "user", content: [{ type: "text", text }], timestamp: Date.now() } as AgentMessage;
 }
 
 function nudgeMessage(nudge: NudgeDecision, blocks: CompressionBlock[], prompts: Prompts): AgentMessage {
