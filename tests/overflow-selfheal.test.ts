@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { inspectOverflowMessage, OverflowEpisode, OVERFLOW_MARKER, reserveOutputHeadroom } from "../src/overflow-selfheal.js";
+import { inspectOverflowMessage, OverflowEpisode, OVERFLOW_MARKER, reserveOutputHeadroom, shouldReserveOutputHeadroom } from "../src/overflow-selfheal.js";
 
 test("inspectOverflowMessage: detects OpenAI context-overflow + parses window", () => {
   const info = inspectOverflowMessage(
@@ -133,4 +133,44 @@ test("OVERFLOW_MARKER: case-insensitive and matches the shared guard patterns", 
   assert.ok(OVERFLOW_MARKER.test("Context Length Exceeded"));
   assert.ok(OVERFLOW_MARKER.test("context_length_exceeded"));
   assert.ok(!OVERFLOW_MARKER.test("too many tokens, please wait before trying again"));
+});
+
+// Provider phrasings the shorter marker set missed — mirrored from pi-ai's
+// own OVERFLOW_PATTERNS (pi-stable-ai/dist/utils/overflow.js). Without them
+// the self-heal never fires for a DIRECT connection to these providers (no
+// relay to normalize the text): pi's native overflow/compaction still copes,
+// but no window is learned and no emergency is armed.
+test("inspectOverflowMessage: provider-specific overflow phrasings", () => {
+  assert.equal(inspectOverflowMessage("Input is too long for requested model").isOverflow, true, "Bedrock");
+  assert.equal(inspectOverflowMessage("This model's maximum prompt length is 131072 but the request contains 537812 tokens").isOverflow, true, "xAI");
+  assert.equal(inspectOverflowMessage("Input length 200000 exceeds the maximum allowed input length of 131072 tokens.").isOverflow, true, "OpenRouter/Poolside");
+  assert.equal(inspectOverflowMessage("The input (200000 tokens) is longer than the model's context length (131072 tokens)").isOverflow, true, "Together AI");
+  assert.equal(inspectOverflowMessage("the request exceeds the available context size, try increasing it").isOverflow, true, "llama.cpp");
+  assert.equal(inspectOverflowMessage("tokens to keep from the initial prompt is greater than the context length").isOverflow, true, "LM Studio");
+  assert.equal(inspectOverflowMessage("invalid params, context window exceeds limit").isOverflow, true, "MiniMax");
+  assert.equal(inspectOverflowMessage("Prompt contains 200000 tokens which is too large for model with 131072 maximum context length").isOverflow, true, "Mistral");
+  assert.equal(inspectOverflowMessage("Prompt has 200000 tokens, but the configured context size is 131072 tokens").isOverflow, true, "DS4");
+  assert.equal(inspectOverflowMessage("model_context_window_exceeded").isOverflow, true, "z.ai");
+  assert.equal(inspectOverflowMessage("prompt too long; exceeded max context length by 12345 tokens").isOverflow, true, "Ollama");
+  assert.equal(inspectOverflowMessage("Range of input length should be [1, 131072]").isOverflow, true, "DashScope/Qwen");
+});
+
+test("inspectOverflowMessage: throttle/throttling phrases are still NOT overflows after the marker extension", () => {
+  assert.equal(inspectOverflowMessage("ThrottlingException: Too many tokens, please wait before trying again.").isOverflow, false);
+  assert.equal(inspectOverflowMessage("Throttling: request rate increased too quickly.").isOverflow, false);
+  assert.equal(inspectOverflowMessage("429 rate limit: Too many tokens, please wait before trying again.").isOverflow, false, "the rewritten retryable form (throttle-retry) stays off the overflow path");
+});
+
+// Anthropic enforces the input limit independently of max_tokens (separate
+// output budget) — reserving the model's output capability would shift every
+// nudge/truncate band down by maxTokens on every session for no safety gain.
+// Other APIs count output against the window — reserve there.
+test("shouldReserveOutputHeadroom: anthropic-messages exempt, other APIs reserve", () => {
+  assert.equal(shouldReserveOutputHeadroom("anthropic-messages"), false);
+  assert.equal(shouldReserveOutputHeadroom("openai-chat"), true);
+  assert.equal(shouldReserveOutputHeadroom("openai-responses"), true);
+  assert.equal(shouldReserveOutputHeadroom("openai-completions"), true);
+  assert.equal(shouldReserveOutputHeadroom("google"), true);
+  assert.equal(shouldReserveOutputHeadroom("bedrock-converse-stream"), true, "conservative for uncertain APIs");
+  assert.equal(shouldReserveOutputHeadroom(undefined), true, "unknown api → conservative (reserve)");
 });

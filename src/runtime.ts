@@ -70,6 +70,10 @@ export interface AcpRuntime {
   /** Per-session overflow self-heal state (learned window + armed emergency).
    *  Keyed by session id so concurrent sessions cannot share an episode. */
   overflowFor(sid: string): OverflowEpisode;
+  /** Drop a session's overflow episode entirely (session_shutdown): releases
+   *  the map entry so a long-lived process cycling through many sessions
+   *  doesn't accumulate them. */
+  overflowDrop(sid: string): void;
 }
 // omp fires the context event before the current user message is persisted to
 // the session branch, so merge event.messages (exact messages about to be sent,
@@ -229,6 +233,9 @@ export function createRuntime(adapter: AdapterConfig): AcpRuntime {
     if (!ep) { ep = new OverflowEpisode(); overflowEpisodes.set(sid, ep); }
     return ep;
   }
+  function overflowDrop(sid: string): void {
+    overflowEpisodes.delete(sid);
+  }
 
   async function acquireLock(sid: string): Promise<() => void> {
     const prev = locks.get(sid) ?? Promise.resolve();
@@ -315,4 +322,4 @@ export function createRuntime(adapter: AdapterConfig): AcpRuntime {
     lastActiveBlockIds.delete(sid);
   }
 
-  return { core, store, density, setCountModel: (m) => { countModelId = m; }, noteActiveBlocks, clearSessionTracking, get adapter() { return adapterRef; }, get prompts() { return promptsRef; }, setPrompts: (p) => { promptsRef = p; }, markNudgeShown: (k) => { nudgeShownTurns.add(k); }, nudgeShownFor: (k) => nudgeShownTurns.has(k), clearNudgeTracking: () => { nudgeShownTurns.clear(); }, liveContextLimit, configFor, reloadConfig, stateFor, save, acquireLock, overflowFor };}
+  return { core, store, density, setCountModel: (m) => { countModelId = m; }, noteActiveBlocks, clearSessionTracking, get adapter() { return adapterRef; }, get prompts() { return promptsRef; }, setPrompts: (p) => { promptsRef = p; }, markNudgeShown: (k) => { nudgeShownTurns.add(k); }, nudgeShownFor: (k) => nudgeShownTurns.has(k), clearNudgeTracking: () => { nudgeShownTurns.clear(); }, liveContextLimit, configFor, reloadConfig, stateFor, save, acquireLock, overflowFor, overflowDrop };}

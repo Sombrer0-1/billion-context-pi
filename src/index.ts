@@ -25,7 +25,7 @@ import { checkForUpdate } from "./update.js";
 import { runSetupAndNotify } from "./setup-subagent-tools.js";
 import { defaultCountTokens } from "acp-kernel";
 import { formatSystemPromptForEvent, getSystemPromptText } from "./compat.js";
-import { inspectOverflowMessage, reserveOutputHeadroom } from "./overflow-selfheal.js";
+import { inspectOverflowMessage, reserveOutputHeadroom, shouldReserveOutputHeadroom } from "./overflow-selfheal.js";
 
 type AgentMessage = SessionMessageEntry["message"];
 
@@ -149,12 +149,17 @@ function wireContextTransform(pi: ExtensionAPI, runtime: AcpRuntime): void {
       // the "context + output > window" overflow on a small window. maxTokens is
       // the model's max output capability (ctx.model.maxTokens). Applied to the
       // (possibly re-centered) window above; never mutates the shared config.
+      // Anthropic is exempt — its input limit is enforced independently of
+      // max_tokens, so reserving would shift every band down by maxTokens with
+      // no safety gain (see shouldReserveOutputHeadroom).
       const maxOutput = (ctx.model as { maxTokens?: number } | undefined)?.maxTokens ?? 0;
-      const reservedWindow = reserveOutputHeadroom(config.modelContextLimit, maxOutput);
-      if (reservedWindow !== config.modelContextLimit) {
-        const before = config.modelContextLimit;
-        config = { ...config, modelContextLimit: reservedWindow };
-        logInfo("overflow-selfheal", { sid, event: "output-headroom", before, after: reservedWindow, maxOutput });
+      if (shouldReserveOutputHeadroom((ctx.model as { api?: string } | undefined)?.api)) {
+        const reservedWindow = reserveOutputHeadroom(config.modelContextLimit, maxOutput);
+        if (reservedWindow !== config.modelContextLimit) {
+          const before = config.modelContextLimit;
+          config = { ...config, modelContextLimit: reservedWindow };
+          logInfo("overflow-selfheal", { sid, event: "output-headroom", before, after: reservedWindow, maxOutput });
+        }
       }
       const coveredIds = collectCoveredMessageIds(state);
       // Nudge arbitration on the SENT-VIEW scale: chars/4 estimate over the
@@ -357,7 +362,7 @@ function wireOverflowSelfHeal(pi: ExtensionAPI, runtime: AcpRuntime): void {
     if (ctx.hasUI) ctx.ui.notify(`[ACP] context overflow detected${info.window ? ` (window ${info.window})` : ""} — forcing emergency compression next turn`);
   });
   pi.on("session_shutdown", (_event, ctx) => {
-    runtime.overflowFor(ctx.sessionManager.getSessionId()).reset();
+    runtime.overflowDrop(ctx.sessionManager.getSessionId());
   });
 }
 

@@ -23,9 +23,15 @@
 
 // Detect a context-overflow error. Deliberately does NOT match Bedrock's
 // "too many tokens" throttle (a 429, handled by throttle-retry) — only
-// genuine context-length errors.
+// genuine context-length errors. The extra phrasings mirror pi-ai's own
+// OVERFLOW_PATTERNS (pi-stable-ai/dist/utils/overflow.js) for providers whose
+// error text the shorter set missed (Bedrock direct, xAI, Ollama, DashScope,
+// llama.cpp, LM Studio, MiniMax, Mistral, Together, Poolside, z.ai) — without
+// them the self-heal silently never fires for a direct connection to those
+// providers (pi's native overflow/compaction handling still copes, but no
+// window is learned and no emergency is armed).
 export const OVERFLOW_MARKER =
-  /prompt is too long|prompt_too_long|prompt_is_too_long|request_too_large|exceeds the context window|exceeds the (maximum |model['’]s )?limit|maximum context length|maximum context size|max context length|context length exceeded|context[_ ]length[_ ]exceeded|exceeded model token limit|input token count.*exceeds|reduce the length of the messages|token limit exceeded/i;
+  /prompt is too long|prompt_too_long|prompt_is_too_long|prompt too long; exceeded (?:max )?context length|request_too_large|exceeds the context window|exceeds the (maximum |model['’]s )?limit|maximum context length|maximum context size|max context length|context length exceeded|context[_ ]length[_ ]exceeded|exceeded model token limit|input token count.*exceeds|reduce the length of the messages|token limit exceeded|input is too long for requested model|maximum prompt length is|exceeds the maximum allowed input length|is longer than the model['’]?s context length|exceeds the available context size|greater than the context length|context window exceeds limit|too large for model with \d+ maximum context length|but the configured context size is|model_context_window_exceeded|range of input length should be/i;
 
 export interface OverflowInfo {
   isOverflow: boolean;
@@ -87,6 +93,22 @@ export function reserveOutputHeadroom(window: number, maxOutput: number): number
     return window - maxOutput;
   }
   return window;
+}
+
+/**
+ * Whether the OUTPUT budget should be reserved from the context window at
+ * all. Anthropic's Messages API enforces the input limit INDEPENDENTLY of
+ * max_tokens (the output budget is separate — input up to the window works
+ * with any max_tokens), so reserving the model's output capability would
+ * shift the nudge/truncate bands down by maxTokens on every session with no
+ * safety gain (e.g. a 200k model with a 64k output budget would start
+ * compressing around 136k). The OpenAI-family APIs count output against the
+ * window, so the reservation is only needed there. Unknown APIs reserve
+ * (conservative — a missed reservation at worst overflows once and the
+ * self-heal corrects it).
+ */
+export function shouldReserveOutputHeadroom(api: string | undefined): boolean {
+  return api !== "anthropic-messages";
 }
 
 // Per-session overflow self-heal state. Keyed by session id so concurrent
