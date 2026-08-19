@@ -14,7 +14,7 @@ import { makeSearchTool } from "./search-tool.js";
 import { makeStatusTool } from "./status-tool.js";
 import { makeDelegateTool, makeDelegateWaitTool, makeDelegateCancelTool, runningRunsSnapshot, resetDelegateUsage, setDelegateDisplayUsage } from "./delegate-tool.js";
 import { makeCommands } from "./commands.js";
-import { coreOutToAgentMessages } from "./messages.js";
+import { coreOutToAgentMessages, extractText } from "./messages.js";
 import { viableRanges } from "billion-context-kit";
 import { buildAcpSystemPrompt, ACP_DELEGATE_PROMPT } from "./system-prompt.js";
 import { delegateStatusWidget } from "./fleet-widget.js";
@@ -25,6 +25,7 @@ import { checkForUpdate } from "./update.js";
 import { runSetupAndNotify } from "./setup-subagent-tools.js";
 import { defaultCountTokens } from "acp-kernel";
 import { formatSystemPromptForEvent, getSystemPromptText } from "./compat.js";
+import { inspectOverflowMessage, reserveOutputHeadroom, shouldReserveOutputHeadroom } from "./overflow-selfheal.js";
 
 type AgentMessage = SessionMessageEntry["message"];
 
@@ -38,6 +39,7 @@ export function createAcpExtension(adapter: AdapterConfig = {}): ExtensionFactor
     wireContextTransform(pi, runtime);
     wireSystemPrompt(pi, runtime);
     wireToolGuardrails(pi, runtime);
+    wireOverflowSelfHeal(pi, runtime);
     pi.registerTool(makeCompressTool(runtime));
     pi.registerTool(makeDecompressTool(runtime));
     pi.registerTool(makeSearchTool(runtime));
@@ -126,7 +128,39 @@ function wireContextTransform(pi: ExtensionAPI, runtime: AcpRuntime): void {
       const modelId = (ctx.model as { id?: string } | undefined)?.id ?? "default";
       runtime.setCountModel(modelId);
       const { state, coreMessages, entries } = await runtime.stateFor(ctx, event.messages);
-      const config = runtime.configFor(ctx);
+      const configBase = runtime.configFor(ctx);
+      const ov = runtime.overflowFor(sid);
+      // Self-heal: a prior upstream overflow may have taught us the real window
+      // (see overflow-selfheal). If it is smaller than what we resolved this
+      // turn (e.g. the 150k fallback for an unknown model), re-center the kernel
+      // on it so the nudge/truncate bands sit below the real limit, not above it.
+      // Learned per MODEL: switching to a bigger model mid-session must not
+      // inherit the smaller model's learned limit. Spread into a new object —
+      // never mutate the shared resolved config.
+      let config = configBase;
+      const learnedWindow = ov.learnedWindowFor(modelId);
+      if (learnedWindow && learnedWindow > 0 && learnedWindow < config.modelContextLimit) {
+        config = { ...config, modelContextLimit: learnedWindow };
+        logInfo("overflow-selfheal", { sid, modelId, event: "window-recenter", resolved: configBase.modelContextLimit, learned: learnedWindow });
+      }
+      // Output headroom: reserve the model's max output budget from the window
+      // so the kernel's nudge/truncate bands sit below (window - maxTokens) —
+      // the context then always leaves room for the model's reply, preventing
+      // the "context + output > window" overflow on a small window. maxTokens is
+      // the model's max output capability (ctx.model.maxTokens). Applied to the
+      // (possibly re-centered) window above; never mutates the shared config.
+      // Anthropic is exempt — its input limit is enforced independently of
+      // max_tokens, so reserving would shift every band down by maxTokens with
+      // no safety gain (see shouldReserveOutputHeadroom).
+      const maxOutput = (ctx.model as { maxTokens?: number } | undefined)?.maxTokens ?? 0;
+      if (shouldReserveOutputHeadroom((ctx.model as { api?: string } | undefined)?.api)) {
+        const reservedWindow = reserveOutputHeadroom(config.modelContextLimit, maxOutput);
+        if (reservedWindow !== config.modelContextLimit) {
+          const before = config.modelContextLimit;
+          config = { ...config, modelContextLimit: reservedWindow };
+          logInfo("overflow-selfheal", { sid, event: "output-headroom", before, after: reservedWindow, maxOutput });
+        }
+      }
       const coveredIds = collectCoveredMessageIds(state);
       // Nudge arbitration on the SENT-VIEW scale: chars/4 estimate over the
       // pruned projection + measured system prompt. pi's real usage is
@@ -150,7 +184,20 @@ function wireContextTransform(pi: ExtensionAPI, runtime: AcpRuntime): void {
       // nudge and emergency truncate past the real window. The estimator
       // below is fed the RAW sentTokens — its samples must stay on the
       // raw basis or density would chase its own calibration.
-      const tokenCount = calibrateTokens(sentTokens, runtime.density.densityFor(modelId));
+      let tokenCount = calibrateTokens(sentTokens, runtime.density.densityFor(modelId));
+      // Self-heal (armed): after an overflow, force this turn's usage to >=95%
+      // so the kernel's emergency nudge + tool-result truncate fire immediately,
+      // even if the density-calibrated estimate under-reports the sent view.
+      // tokenCount only feeds processTurn (nudge/truncate); density.update below
+      // uses the raw sentTokens, so the boost cannot corrupt calibration.
+      if (ov.armed && config.modelContextLimit > 0) {
+        ov.armed = false;
+        const floor = Math.floor(config.modelContextLimit * 0.95);
+        if (floor > tokenCount) {
+          tokenCount = floor;
+          logWarn("overflow-selfheal", { sid, event: "armed-emergency", tokenCount, limit: config.modelContextLimit });
+        }
+      }
       // A compress happened since the previous context round: blocks are
       // created out-of-band by the compress tool, so detect new active
       // blocks on the LOADED state vs. the previous round (comparing a
@@ -282,6 +329,40 @@ function wireSystemPrompt(pi: ExtensionAPI, runtime: AcpRuntime): void {
     const acp = buildAcpSystemPrompt(runtime.prompts);
     const prompt = delegate ? `${acp}\n${ACP_DELEGATE_PROMPT}` : acp;
     return { systemPrompt: formatSystemPromptForEvent(event.systemPrompt, prompt) };
+  });
+}
+
+// Context-overflow self-heal: when the model API rejects a request because the
+// context is too large (a context-overflow 400), learn the real window (if the
+// error states it) and arm an emergency for the next turn. The `context` handler
+// (wireContextTransform) reads the learned window + armed flag via
+// runtime.overflowFor(sid). Design: src/overflow-selfheal.ts.
+//
+// Unlike throttle-retry we do NOT rewrite the error or ask pi to retry: the
+// overflow is real, and re-sending the same context would overflow again. The
+// error surfaces; the next turn self-heals.
+function wireOverflowSelfHeal(pi: ExtensionAPI, runtime: AcpRuntime): void {
+  pi.on("message_end", (event, ctx) => {
+    const msg = event.message;
+    if (msg.role !== "assistant") return;
+    if (msg.stopReason !== "error") return;
+    // Haystack = errorMessage + error content: some relays put the upstream
+    // error body in the streamed content and leave errorMessage generic
+    // ("Provider finish_reason: error_finish") — errorMessage alone would miss
+    // them. (Same haystack approach as isThrottleError.)
+    const haystack = `${msg.errorMessage ?? ""}\n${extractText(msg.content)}`;
+    const info = inspectOverflowMessage(haystack);
+    if (!info.isOverflow) return;
+    const sid = ctx.sessionManager.getSessionId();
+    const modelId = (ctx.model as { id?: string } | undefined)?.id ?? "default";
+    const ov = runtime.overflowFor(sid);
+    if (info.window) ov.setLearnedWindow(modelId, info.window);
+    ov.armed = true;
+    logWarn("overflow-selfheal", { sid, modelId, event: "detected", window: info.window ?? null, message: info.message.slice(0, 200) });
+    if (ctx.hasUI) ctx.ui.notify(`[ACP] context overflow detected${info.window ? ` (window ${info.window})` : ""} — forcing emergency compression next turn`);
+  });
+  pi.on("session_shutdown", (_event, ctx) => {
+    runtime.overflowDrop(ctx.sessionManager.getSessionId());
   });
 }
 
