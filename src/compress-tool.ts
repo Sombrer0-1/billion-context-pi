@@ -7,7 +7,7 @@ import type {
 import type { AcpRuntime } from "./runtime.js";
 import { debug, logError, logInfo, logThrow, logWarn } from "./log.js";
 import { estimateTokens, collectCoveredMessageIds, calibrateTokens } from "./tokens.js";
-import { defaultCountTokens } from "acp-kernel";
+import { defaultCountTokens, type CompressionBlock } from "acp-kernel";
 import { getSystemPromptText } from "./compat.js";
 
 function formatK(n: number): string {
@@ -102,6 +102,25 @@ export function isCompressSuccessText(text: string): boolean {
   return text.trimStart().startsWith("▣ ACP |");
 }
 
+function tier3OnlyRewrite(newBlocks: CompressionBlock[], allBlocks: CompressionBlock[]): string[] | null {
+  if (newBlocks.length === 0) return null;
+  const byId = new Map(allBlocks.map((b) => [b.blockId, b]));
+  const spans: string[] = [];
+  for (const b of newBlocks) {
+    const consumed = b.directBlockIds.map((id) => byId.get(id));
+    if (
+      b.tier !== 3 ||
+      b.directMessageIds.length > 0 ||
+      b.directBlockIds.length === 0 ||
+      consumed.some((c) => !c || c.tier !== 3)
+    ) {
+      return null;
+    }
+    spans.push(`${b.startRef ?? "?"}..${b.endRef ?? "?"}`);
+  }
+  return spans;
+}
+
 async function handleCompress(args: CompressArgs, runtime: AcpRuntime, ctx: ExtensionContext, toolCallId?: string): Promise<string> {
   const maybeRanges = normalizeRanges(args.content);
   // Argument errors throw (not return): pi-agent-core only sets isError:true
@@ -151,6 +170,21 @@ async function handleCompress(args: CompressArgs, runtime: AcpRuntime, ctx: Exte
     state,
     config,
   });
+  const rewriteSpans = applied.result.blocksCreated > 0
+    ? tier3OnlyRewrite(applied.state.blocks.slice(-applied.result.blocksCreated), applied.state.blocks)
+    : null;
+  if (rewriteSpans) {
+    await runtime.save(state, ctx);
+    logWarn("compress", {
+      sid: ctx.sessionManager.getSessionId(),
+      event: "tier3-rewrite-rejected",
+      spans: rewriteSpans,
+    });
+    throw new Error(
+      `Range ${rewriteSpans.join(", ")} only re-condenses terminal tier-3 block(s) — T3 is the highest tier, so rewriting it reclaims nothing and can repeat forever (dog/billion-context-pi#3). Nothing was compressed. ` +
+        `Use search_context or decompress to retrieve details, or pick a range containing uncompressed messages (acp_status lists compressible ranges).`,
+    );
+  }
   await runtime.save(applied.state, ctx);
   const { blocksCreated, tokensCompressed, errors, warnings } = applied.result;
 
