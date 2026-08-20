@@ -93,13 +93,26 @@ function normalizeRanges(content: CompressArgs["content"]): RangeEntry[] | strin
   return ranges as RangeEntry[];
 }
 
-/** True when a (non-error) compress toolResult text represents a completed
- *  compression run — the "▣ ACP | …" panel. Other non-error strings ("No
- *  ranges provided.", semantic "Errors: …" panels with nothing reclaimed)
- *  are neutral outcomes that neither reset nor advance the retry counter
- *  (see noteCompressOutcomes in runtime.ts). */
+/** Panel block count ("… (~N reclaimed, B blocks)"), or -1 for non-panels. */
+function compressPanelBlocks(text: string): number {
+  if (!text.trimStart().startsWith("▣ ACP |")) return -1;
+  const m = text.match(/, (\d+) blocks?\)/);
+  return m ? Number(m[1]) : -1;
+}
+
+/** Success = completed run that created >= 1 block (partial range errors
+ *  still count: progress was made). A 0-block panel must NOT be success —
+ *  it would reset the retry counter while the emergency nudge re-fires,
+ *  looping no-op compressions (issue #6). */
 export function isCompressSuccessText(text: string): boolean {
-  return text.trimStart().startsWith("▣ ACP |");
+  return compressPanelBlocks(text) > 0;
+}
+
+/** No-op = completed run that compressed nothing (0-block panel: every
+ *  range skipped). Counted as a FAILED attempt by noteCompressOutcomes so
+ *  the retry cap applies. Non-panels ("No ranges provided.") stay neutral. */
+export function isCompressNoopText(text: string): boolean {
+  return compressPanelBlocks(text) === 0;
 }
 
 async function handleCompress(args: CompressArgs, runtime: AcpRuntime, ctx: ExtensionContext, toolCallId?: string): Promise<string> {
