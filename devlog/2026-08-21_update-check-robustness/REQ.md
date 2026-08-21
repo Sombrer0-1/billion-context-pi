@@ -15,6 +15,7 @@
 - **Expected behavior**:
   - 版本检查优先走 `npm view billion-context-pi version`（尊重本机 registry/proxy/auth 配置，与安装步同一工具链）；npm 不可用时回退直接 registry fetch。
   - 安装失败/跳过原因写入 `~/.pi/acp.log`（含 npm stderr），可诊断。
+  - headless 模式（print/rpc/json）下 session_start / context 处理器 await 更新检查，进程退出不会杀掉进行中的 npm install；TUI 保持 fire-and-forget。
 - **Impact**: 无数据丢失、无崩溃；补齐受影响机器"检测不到新版本"的缺口；不受影响机器行为等价（保留 fetch 回退）。
 
 ## 2. Reproduction (if applicable)
