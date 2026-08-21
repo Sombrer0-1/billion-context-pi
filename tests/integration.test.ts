@@ -12,7 +12,12 @@ import { setRunNpmForTest } from "../src/update.js";
 // resolving it through this fake (no network, no update available).
 setRunNpmForTest(async (args) => ({ code: 0, stdout: args[0] === "view" ? "0.0.1\n" : "", stderr: "" }));
 
-const UPDATE_THROTTLE_FILE = join(homedir(), CONFIG_DIR_NAME, "agent", ".billion-context-pi-update-check");
+// Never touch the real throttle file under the user's home dir: parallel test
+// processes race on it (one stamps while another just deleted it → the check
+// silently skips "npm view" and the test times out). Per-pid temp file + env
+// override (src/update.ts reads it lazily) keeps this file hermetic.
+const UPDATE_THROTTLE_FILE = join(tmpdir(), `acp-test-update-throttle-${process.pid}`);
+process.env.ACP_UPDATE_THROTTLE_FILE = UPDATE_THROTTLE_FILE;
 
 // Mock Pi's ExtensionAPI — captures the event handlers the factory registers,
 // so we can invoke them with a fake ExtensionContext and assert the wiring works.

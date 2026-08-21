@@ -37,6 +37,10 @@ const THROTTLE = join(
   "agent",
   ".billion-context-pi-update-check",
 );
+// HOME redirection is a no-op on Windows (os.homedir() reads USERPROFILE), so
+// also pin the throttle file via env — src/update.ts resolves it lazily and
+// prefers this over any homedir-derived path.
+process.env.ACP_UPDATE_THROTTLE_FILE = THROTTLE;
 const REPO_VERSION: string = JSON.parse(
   readFileSync(new URL("../package.json", import.meta.url), "utf-8"),
 ).version;

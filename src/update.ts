@@ -12,7 +12,12 @@ const PACKAGE_NAME = "billion-context-pi";
 const REGISTRY_URL = `https://registry.npmjs.org/${PACKAGE_NAME}/latest`;
 const SEMVER_RE = /^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z-.]+)?$/;
 const CHECK_INTERVAL_MS = 3 * 60 * 1000;
-const THROTTLE_FILE = join(homedir(), CONFIG_DIR_NAME, "agent", ".billion-context-pi-update-check");
+// Resolved lazily (not at module load) so tests can redirect it via env at any
+// time. Without this, parallel test processes race on the real file under the
+// user's home dir: one process stamps the throttle timestamp while another has
+// just deleted it, making the victim's check skip "npm view" entirely.
+const throttleFile = () =>
+  process.env.ACP_UPDATE_THROTTLE_FILE ?? join(homedir(), CONFIG_DIR_NAME, "agent", ".billion-context-pi-update-check");
 
 // Guards against concurrent checks: the context event fires on every LLM call,
 // so several can race past the throttle read before any writes the timestamp.
@@ -61,7 +66,7 @@ export function isNewer(latest: string, current: string): boolean {
 
 async function readLastCheck(): Promise<number> {
   try {
-    const data = await readFile(THROTTLE_FILE, "utf-8");
+    const data = await readFile(throttleFile(), "utf-8");
     return parseInt(data.trim(), 10) || 0;
   } catch {
     return 0;
@@ -70,8 +75,8 @@ async function readLastCheck(): Promise<number> {
 
 async function writeLastCheck(timestamp: number): Promise<void> {
   try {
-    await mkdir(dirname(THROTTLE_FILE), { recursive: true });
-    await writeFile(THROTTLE_FILE, String(timestamp), "utf-8");
+    await mkdir(dirname(throttleFile()), { recursive: true });
+    await writeFile(throttleFile(), String(timestamp), "utf-8");
   } catch {
     // best-effort
   }
