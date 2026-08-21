@@ -5,6 +5,7 @@ import { getSystemPromptText } from "./compat.js";
 import { collectCoveredMessageIds, estimateTokens, calibrateTokens } from "./tokens.js";
 import { buildStatusPanel } from "billion-context-kit";
 import { getDelegateUsage } from "./delegate-tool.js";
+import { ensureSubagentAcpTools } from "./setup-subagent-tools.js";
 
 declare const CURRENT_VERSION: string;
 
@@ -69,6 +70,28 @@ export function makeCommands(runtime: AcpRuntime): Array<{ name: string; options
           }
           const lines = hits.map((b) => `[${b.blockId}] (t${b.tier}) ${b.topic ?? ""}`.trim());
           ctx.ui.notify(lines.join("\n"));
+        },
+      },
+    },
+    {
+      name: "acp-subagents",
+      options: {
+        description:
+          "Add ACP context tools (compress/decompress/search_context/acp_status) to pi-subagents' builtin agents. " +
+          "One-time setup — re-run after upgrading pi-subagents. Usage: /acp-subagents [installDir]",
+        handler: async (args, ctx) => {
+          const installDir = args.trim();
+          const result = ensureSubagentAcpTools(undefined, installDir ? { installDir } : undefined);
+          if (result.action === "updated") {
+            ctx.ui.notify(`ACP tools enabled for pi-subagents agents in ${result.path}`);
+          } else if (result.action === "skipped") {
+            ctx.ui.notify(
+              `Nothing to do: ${result.reason ?? ""}. ` +
+                "Install pi-subagents (pi install npm:pi-subagents) or pass its directory: /acp-subagents <installDir>",
+            );
+          } else {
+            ctx.ui.notify(`Failed to update ${result.path}: ${result.reason ?? "unknown"}`);
+          }
         },
       },
     },

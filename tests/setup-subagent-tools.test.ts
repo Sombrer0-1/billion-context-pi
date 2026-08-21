@@ -1,149 +1,262 @@
-import assert from "node:assert/strict";
-import { test } from "node:test";
-import { mkdtempSync, writeFileSync, readFileSync, rmSync, statSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { ensureSubagentAcpTools } from "../src/setup-subagent-tools.js";
+import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
+import { strict as assert } from "node:assert";
+import { afterEach, beforeEach, describe, it } from "node:test";
+import { ACP_TOOLS } from "../src/setup-subagent-tools.js";
 
-const ACP_TOOLS = ["compress", "decompress", "search_context", "acp_status"];
+const { ensureSubagentAcpTools } = await import("../src/setup-subagent-tools.js");
 
-function tmpDir(): string {
-  return mkdtempSync(join(tmpdir(), "acp-setup-"));
+let tmp: string;
+let agentDir: string;
+let projectDir: string;
+let settingsPath: string;
+
+function writeSettings(data: Record<string, unknown>): void {
+  fs.writeFileSync(settingsPath, JSON.stringify(data, null, 2) + "\n", "utf-8");
 }
 
-function writeSettings(dir: string, obj: unknown): string {
-  const p = join(dir, "settings.json");
-  writeFileSync(p, JSON.stringify(obj, null, 2));
-  return p;
+function readSettings(): Record<string, unknown> {
+  return JSON.parse(fs.readFileSync(settingsPath, "utf-8"));
 }
 
-function readSettings(path: string): Record<string, unknown> {
-  return JSON.parse(readFileSync(path, "utf-8"));
+function overridesOf(settings: Record<string, unknown>): Record<string, Record<string, unknown>> {
+  const sub = settings.subagents as Record<string, unknown>;
+  return (sub.agentOverrides ?? {}) as Record<string, Record<string, unknown>>;
 }
 
-function allAgentsHaveAcp(path: string): boolean {
-  const s = readSettings(path);
-  const o = (s.subagents as Record<string, unknown> | undefined)?.agentOverrides as Record<string, { tools?: string[] }> | undefined;
-  if (!o) return false;
-  const names = ["advisor", "context-builder", "delegate", "oracle", "planner", "researcher", "reviewer", "scout", "worker"];
-  return names.every((n) => Array.isArray(o[n]?.tools) && ACP_TOOLS.every((t) => o[n]!.tools!.includes(t)));
+/** Create a fake pi-subagents install with the agent set from v0.53.0. */
+function installPiSubagents(dir: string): void {
+  fs.mkdirSync(path.join(dir, "agents"), { recursive: true });
+  fs.writeFileSync(
+    path.join(dir, "package.json"),
+    JSON.stringify({ name: "pi-subagents", version: "0.53.0" }, null, 2) + "\n",
+  );
+  const agents: Array<[string, string[] | null]> = [
+    ["worker", ["read", "grep", "find", "ls", "bash", "edit", "write", "contact_supervisor"]],
+    ["reviewer", ["read", "grep", "find", "ls"]],
+    ["oracle", null], // unrestricted — no tools line in frontmatter
+  ];
+  for (const [name, tools] of agents) {
+    const lines = ["---", `name: ${name}`];
+    if (tools) lines.push(`tools: ${tools.join(", ")}`);
+    lines.push("---", `# ${name}`);
+    fs.writeFileSync(path.join(dir, "agents", `${name}.md`), lines.join("\n") + "\n");
+  }
 }
 
-test("creates overrides for all builtin agents when settings has no subagents", async () => {
-  const dir = tmpDir();
-  const path = writeSettings(dir, { theme: "dark", defaultModel: "gpt-4" });
-  const result = await ensureSubagentAcpTools(path);
-  assert.equal(result.action, "updated");
-  assert.ok(allAgentsHaveAcp(path), "all agents should have ACP tools");
-  const s = readSettings(path);
-  assert.equal(s.theme, "dark", "preserves existing fields");
-  assert.equal(s.defaultModel, "gpt-4", "preserves existing fields");
-  rmSync(dir, { recursive: true, force: true });
+beforeEach(() => {
+  tmp = fs.mkdtempSync(path.join(os.tmpdir(), "acp-setup-test-"));
+  agentDir = path.join(tmp, "agent");
+  projectDir = path.join(tmp, "proj");
+  fs.mkdirSync(agentDir, { recursive: true });
+  fs.mkdirSync(projectDir, { recursive: true });
+  settingsPath = path.join(agentDir, "settings.json");
 });
 
-test("is idempotent — second run skips and does not rewrite file", async () => {
-  const dir = tmpDir();
-  const path = writeSettings(dir, { theme: "dark" });
-  const first = await ensureSubagentAcpTools(path);
-  assert.equal(first.action, "updated");
-  const firstMtime = statSync(path).mtimeMs;
-  const second = await ensureSubagentAcpTools(path);
-  assert.equal(second.action, "skipped");
-  assert.match(second.reason!, /already have ACP tools/);
-  assert.equal(statSync(path).mtimeMs, firstMtime, "file not rewritten on skip");
-  rmSync(dir, { recursive: true, force: true });
+afterEach(() => {
+  fs.rmSync(tmp, { recursive: true, force: true });
 });
 
-test("preserves user-customized override tools and appends ACP", async () => {
-  const dir = tmpDir();
-  const path = writeSettings(dir, {
-    subagents: {
-      agentOverrides: {
-        delegate: { tools: ["read", "bash", "myCustomTool"] },
+describe("ensureSubagentAcpTools — pi-subagents detection (#179)", () => {
+  it("skips without touching settings when pi-subagents is not installed", () => {
+    const stale = {
+      subagents: {
+        agentOverrides: {
+          advisor: { model: "test-model", tools: ["read", "grep", "find", "ls", "compress"] },
+        },
       },
-    },
-  });
-  const result = await ensureSubagentAcpTools(path);
-  assert.equal(result.action, "updated");
-  const s = readSettings(path);
-  const tools = (s.subagents as Record<string, unknown>).agentOverrides.delegate.tools as string[];
-  assert.ok(tools.includes("myCustomTool"), "preserves user custom tool");
-  assert.ok(ACP_TOOLS.every((t) => tools.includes(t)), "has ACP tools");
-  assert.ok(tools.includes("read") && tools.includes("bash"), "preserves original tools");
-  rmSync(dir, { recursive: true, force: true });
-});
+    };
+    writeSettings(stale);
 
-test("does not duplicate ACP tools when already partially present", async () => {
-  const dir = tmpDir();
-  const path = writeSettings(dir, {
-    subagents: {
-      agentOverrides: {
-        delegate: { tools: ["read", "grep", "find", "ls", "bash", "edit", "write", "contact_supervisor", ...ACP_TOOLS] },
+    const result = ensureSubagentAcpTools(settingsPath, { agentDir, cwd: projectDir });
+    assert.equal(result.action, "skipped");
+    assert.match(result.reason ?? "", /not installed/);
+
+    const after = readSettings();
+    assert.deepEqual(
+      overridesOf(after).advisor.tools,
+      ["read", "grep", "find", "ls", "compress"],
+    );
+    assert.ok(!fs.existsSync(`${settingsPath}.acp-bak`), "no backup when skipped");
+  });
+
+  it("does not create settings-related artifacts when pi-subagents is absent", () => {
+    writeSettings({});
+    const result = ensureSubagentAcpTools(settingsPath, { agentDir, cwd: projectDir });
+    assert.equal(result.action, "skipped");
+    assert.deepEqual(readSettings(), {});
+  });
+
+  it("detects a user-scope npm install under <agentDir>/npm/node_modules", () => {
+    installPiSubagents(path.join(agentDir, "npm", "node_modules", "pi-subagents"));
+    writeSettings({});
+
+    const result = ensureSubagentAcpTools(settingsPath, { agentDir, cwd: projectDir });
+    assert.equal(result.action, "updated");
+
+    const overrides = overridesOf(readSettings());
+    assert.deepEqual(overrides.worker.tools, [
+      "read", "grep", "find", "ls", "bash", "edit", "write", "contact_supervisor",
+      ...ACP_TOOLS,
+    ]);
+    assert.deepEqual(overrides.reviewer.tools, ["read", "grep", "find", "ls", ...ACP_TOOLS]);
+    assert.ok(!("oracle" in overrides), "unrestricted agent must not get an override entry");
+  });
+
+  it("detects a project-scope npm install under <cwd>/.pi/npm/node_modules", () => {
+    installPiSubagents(path.join(projectDir, ".pi", "npm", "node_modules", "pi-subagents"));
+    writeSettings({});
+
+    const result = ensureSubagentAcpTools(settingsPath, { agentDir, cwd: projectDir });
+    assert.equal(result.action, "updated");
+    const overrides = overridesOf(readSettings());
+    assert.ok(ACP_TOOLS.every((t) => (overrides.worker.tools as string[]).includes(t)));
+  });
+
+  it("detects pi-subagents placed in the extensions directory", () => {
+    const extDir = path.join(agentDir, "extensions", "pi-subagents");
+    installPiSubagents(extDir);
+    writeSettings({});
+
+    const result = ensureSubagentAcpTools(settingsPath, { agentDir, cwd: projectDir });
+    assert.equal(result.action, "updated");
+    const overrides = overridesOf(readSettings());
+    assert.ok(ACP_TOOLS.every((t) => (overrides.reviewer.tools as string[]).includes(t)));
+  });
+
+  it("accepts an explicit installDir outside the detected locations", () => {
+    const hidden = path.join(projectDir, "vendor", "pi-subagents-fork");
+    installPiSubagents(hidden);
+    writeSettings({});
+
+    const result = ensureSubagentAcpTools(settingsPath, { agentDir, cwd: projectDir, installDir: hidden });
+    assert.equal(result.action, "updated");
+    const overrides = overridesOf(readSettings());
+    assert.ok(ACP_TOOLS.every((t) => (overrides.worker.tools as string[]).includes(t)));
+  });
+
+  it("fails with a clear reason when the explicit installDir is not a package", () => {
+    writeSettings({});
+    const result = ensureSubagentAcpTools(settingsPath, { agentDir, cwd: projectDir, installDir: path.join(projectDir, "nope") });
+    assert.equal(result.action, "failed");
+    assert.match(result.reason ?? "", /not a package/);
+    assert.deepEqual(readSettings(), {});
+  });
+
+  it("skips when the install ships no agents/*.md", () => {
+    const installDir = path.join(agentDir, "npm", "node_modules", "pi-subagents");
+    fs.mkdirSync(installDir, { recursive: true });
+    fs.writeFileSync(path.join(installDir, "package.json"), JSON.stringify({ name: "pi-subagents" }));
+    writeSettings({});
+
+    const result = ensureSubagentAcpTools(settingsPath, { agentDir, cwd: projectDir });
+    assert.equal(result.action, "skipped");
+    assert.match(result.reason ?? "", /no agents/);
+    assert.deepEqual(readSettings(), {});
+  });
+
+  it("never recreates the stale 9-agent set — only agents the package ships", () => {
+    installPiSubagents(path.join(agentDir, "npm", "node_modules", "pi-subagents"));
+    writeSettings({
+      subagents: {
+        agentOverrides: {
+          // Leftovers from older billion-context-pi versions.
+          advisor: { tools: ["read", "bash", "intercom", "compress"] },
+          planner: { tools: ["read", "grep", "find", "ls", "bash", "intercom"] },
+        },
       },
-    },
+    });
+
+    const result = ensureSubagentAcpTools(settingsPath, { agentDir, cwd: projectDir });
+    assert.equal(result.action, "updated");
+
+    const overrides = overridesOf(readSettings());
+    // Stale entries are preserved byte-for-byte (we never rewrite them).
+    assert.deepEqual(overrides.advisor.tools, ["read", "bash", "intercom", "compress"]);
+    assert.deepEqual(overrides.planner.tools, ["read", "grep", "find", "ls", "bash", "intercom"]);
+    assert.deepEqual(Object.keys(overrides).sort(), ["advisor", "planner", "reviewer", "worker"]);
   });
-  const result = await ensureSubagentAcpTools(path);
-  assert.equal(result.action, "updated");
-  const s = readSettings(path);
-  const delegateTools = (s.subagents as Record<string, unknown>).agentOverrides.delegate.tools as string[];
-  assert.equal(delegateTools.length, 12, "delegate unchanged (no duplicate added)");
-  rmSync(dir, { recursive: true, force: true });
 });
 
-test("preserves other override fields (model, thinking)", async () => {
-  const dir = tmpDir();
-  const path = writeSettings(dir, {
-    subagents: {
-      agentOverrides: {
-        delegate: { model: "custom-model", thinking: "high", tools: ["read", "bash"] },
+describe("ensureSubagentAcpTools — merge behavior", () => {
+  it("appends missing ACP tools to a user-custom override", () => {
+    installPiSubagents(path.join(agentDir, "npm", "node_modules", "pi-subagents"));
+    writeSettings({
+      subagents: {
+        agentOverrides: {
+          worker: { tools: ["bash", "read"], model: "my-model" },
+        },
       },
-    },
+    });
+
+    const result = ensureSubagentAcpTools(settingsPath, { agentDir, cwd: projectDir });
+    assert.equal(result.action, "updated");
+
+    const worker = overridesOf(readSettings()).worker;
+    assert.deepEqual(worker.tools, ["bash", "read", ...ACP_TOOLS]);
+    assert.equal(worker.model, "my-model", "non-tools fields are preserved");
   });
-  const result = await ensureSubagentAcpTools(path);
-  assert.equal(result.action, "updated");
-  const s = readSettings(path);
-  const delegate = (s.subagents as Record<string, unknown>).agentOverrides.delegate as Record<string, unknown>;
-  assert.equal(delegate.model, "custom-model", "preserves model override");
-  assert.equal(delegate.thinking, "high", "preserves thinking override");
-  rmSync(dir, { recursive: true, force: true });
+
+  it("completes an override that already has some ACP tools without reordering", () => {
+    installPiSubagents(path.join(agentDir, "npm", "node_modules", "pi-subagents"));
+    writeSettings({
+      subagents: {
+        agentOverrides: {
+          worker: { tools: ["read", "compress"] },
+        },
+      },
+    });
+
+    const result = ensureSubagentAcpTools(settingsPath, { agentDir, cwd: projectDir });
+    assert.equal(result.action, "updated");
+
+    const tools = overridesOf(readSettings()).worker.tools as string[];
+    assert.deepEqual(tools, ["read", "compress", "decompress", "search_context", "acp_status"]);
+  });
+
+  it("is idempotent — second run is a no-op", () => {
+    installPiSubagents(path.join(agentDir, "npm", "node_modules", "pi-subagents"));
+    writeSettings({});
+
+    assert.equal(ensureSubagentAcpTools(settingsPath, { agentDir, cwd: projectDir }).action, "updated");
+    const snapshot = fs.readFileSync(settingsPath, "utf-8");
+    const second = ensureSubagentAcpTools(settingsPath, { agentDir, cwd: projectDir });
+    assert.equal(second.action, "skipped");
+    assert.match(second.reason ?? "", /already have ACP tools/);
+    assert.equal(fs.readFileSync(settingsPath, "utf-8"), snapshot);
+  });
+
+  it("creates a backup once and keeps it on later updates", () => {
+    installPiSubagents(path.join(agentDir, "npm", "node_modules", "pi-subagents"));
+    writeSettings({});
+
+    assert.equal(ensureSubagentAcpTools(settingsPath, { agentDir, cwd: projectDir }).action, "updated");
+    assert.ok(fs.existsSync(`${settingsPath}.acp-bak`));
+    const backupSnapshot = fs.readFileSync(`${settingsPath}.acp-bak`, "utf-8");
+    // Simulate a further user edit then another update.
+    fs.writeFileSync(settingsPath, JSON.stringify({ subagents: {} }, null, 2) + "\n");
+    assert.equal(ensureSubagentAcpTools(settingsPath, { agentDir, cwd: projectDir }).action, "updated");
+    assert.equal(fs.readFileSync(`${settingsPath}.acp-bak`, "utf-8"), backupSnapshot);
+  });
 });
 
-test("returns failed on invalid JSON without modifying file", async () => {
-  const dir = tmpDir();
-  const path = join(dir, "settings.json");
-  writeFileSync(path, "{ not valid json");
-  const before = statSync(path).mtimeMs;
-  const result = await ensureSubagentAcpTools(path);
-  assert.equal(result.action, "failed");
-  assert.match(result.reason!, /not valid JSON/);
-  assert.equal(statSync(path).mtimeMs, before, "file untouched on parse failure");
-  rmSync(dir, { recursive: true, force: true });
-});
+describe("ensureSubagentAcpTools — error handling", () => {
+  it("skips when settings.json is missing", () => {
+    installPiSubagents(path.join(agentDir, "npm", "node_modules", "pi-subagents"));
+    const result = ensureSubagentAcpTools(settingsPath, { agentDir, cwd: projectDir });
+    assert.equal(result.action, "skipped");
+    assert.match(result.reason ?? "", /not found/);
+  });
 
-test("returns skipped when settings.json does not exist", async () => {
-  const dir = tmpDir();
-  const path = join(dir, "settings.json");
-  const result = await ensureSubagentAcpTools(path);
-  assert.equal(result.action, "skipped");
-  assert.match(result.reason!, /not found/);
-  rmSync(dir, { recursive: true, force: true });
-});
+  it("fails on invalid JSON without modifying the file", () => {
+    installPiSubagents(path.join(agentDir, "npm", "node_modules", "pi-subagents"));
+    const broken = "{ not valid json";
+    fs.writeFileSync(settingsPath, broken, "utf-8");
 
-test("creates backup on first write, not on subsequent skips", async () => {
-  const dir = tmpDir();
-  const original = { theme: "light", customField: 42 };
-  const path = writeSettings(dir, original);
-  const backupPath = `${path}.acp-bak`;
-
-  const first = await ensureSubagentAcpTools(path);
-  assert.equal(first.action, "updated");
-
-  const backupContent = readSettings(backupPath);
-  assert.deepEqual(backupContent, original, "backup contains pre-edit content");
-
-  const backupMtime = statSync(backupPath).mtimeMs;
-  const second = await ensureSubagentAcpTools(path);
-  assert.equal(second.action, "skipped");
-  assert.equal(statSync(backupPath).mtimeMs, backupMtime, "backup not rewritten");
-  rmSync(dir, { recursive: true, force: true });
+    const result = ensureSubagentAcpTools(settingsPath, { agentDir, cwd: projectDir });
+    assert.equal(result.action, "failed");
+    assert.match(result.reason ?? "", /not valid JSON/);
+    assert.equal(fs.readFileSync(settingsPath, "utf-8"), broken);
+  });
 });
