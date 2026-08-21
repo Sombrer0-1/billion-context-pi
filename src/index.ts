@@ -107,9 +107,13 @@ function wireSessionLifecycle(pi: ExtensionAPI, runtime: AcpRuntime): void {
       pi.registerTool(makeDelegateWaitTool(pi));
       pi.registerTool(makeDelegateCancelTool(pi));
     }
-    void checkForUpdate(runtime.adapter.autoUpdate ?? true, (msg) => {
+    // Headless hosts exit as soon as the turn ends; awaiting the check keeps
+    // the process alive until a running install finishes. TUI stays
+    // fire-and-forget so interactive startup is never blocked by npm.
+    const updateCheck = checkForUpdate(runtime.adapter.autoUpdate ?? true, (msg) => {
       if (ctx.hasUI) ctx.ui.notify(msg);
     });
+    if (!ctx.hasUI) await updateCheck;
     // Bind the TUI status widget for async delegates. The widget reads the
     // in-memory runs Map (via runningRunsSnapshot) and renders a live list of
     // running delegates below the editor. Only the interactive TUI has a UI;
@@ -357,9 +361,12 @@ function wireContextTransform(pi: ExtensionAPI, runtime: AcpRuntime): void {
     // long-running session never re-fires session_start, so an update could
     // go unnoticed for days. checkForUpdate throttles internally (3 min) and
     // is guarded against concurrent calls, so firing it per LLM call is safe.
-    void checkForUpdate(runtime.adapter.autoUpdate ?? true, (msg) => {
+    // Headless: await so a process exiting after this turn cannot kill a
+    // running install (TUI stays fire-and-forget to avoid blocking the turn).
+    const updateCheck = checkForUpdate(runtime.adapter.autoUpdate ?? true, (msg) => {
       if (ctx.hasUI) ctx.ui.notify(msg);
     });
+    if (!ctx.hasUI) await updateCheck;
     return { messages: rebuilt };
     } catch (e) {
       logThrow("context", e, { sid, phase: "transform" });
