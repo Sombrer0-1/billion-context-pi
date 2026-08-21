@@ -125,6 +125,25 @@ describe("ensureSubagentAcpTools — pi-subagents detection (#179)", () => {
     assert.ok(ACP_TOOLS.every((t) => (overrides.reviewer.tools as string[]).includes(t)));
   });
 
+  it("accepts an explicit installDir outside the detected locations", () => {
+    const hidden = path.join(projectDir, "vendor", "pi-subagents-fork");
+    installPiSubagents(hidden);
+    writeSettings({});
+
+    const result = ensureSubagentAcpTools(settingsPath, { agentDir, cwd: projectDir, installDir: hidden });
+    assert.equal(result.action, "updated");
+    const overrides = overridesOf(readSettings());
+    assert.ok(ACP_TOOLS.every((t) => (overrides.worker.tools as string[]).includes(t)));
+  });
+
+  it("fails with a clear reason when the explicit installDir is not a package", () => {
+    writeSettings({});
+    const result = ensureSubagentAcpTools(settingsPath, { agentDir, cwd: projectDir, installDir: path.join(projectDir, "nope") });
+    assert.equal(result.action, "failed");
+    assert.match(result.reason ?? "", /not a package/);
+    assert.deepEqual(readSettings(), {});
+  });
+
   it("skips when the install ships no agents/*.md", () => {
     const installDir = path.join(agentDir, "npm", "node_modules", "pi-subagents");
     fs.mkdirSync(installDir, { recursive: true });

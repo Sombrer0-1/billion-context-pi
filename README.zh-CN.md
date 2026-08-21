@@ -132,6 +132,18 @@ Blocks: 3 active (3.7K summary, 15.2K original compressed)
   b3 (T2)  3.3K→1.0K  age=1m  "Architecture review"
 ```
 
+## `/acp-subagents` 命令
+
+**可选、一次性设置——仅当你同时使用 [pi-subagents](https://github.com/nicobailon/pi-subagents) 时需要。**
+
+billion-context-pi 自带的 `acp_delegate` 工具可独立工作。如果你另外保留了 pi-subagents,并希望它的内置子代理在长任务中也能使用 ACP 上下文工具(`compress`/`decompress`/`search_context`/`acp_status`),运行:
+
+```
+/acp-subagents
+```
+
+它会从已安装的 pi-subagents 包中发现 agent 名单与工具基线,并向 `~/.pi/agent/settings.json` 的 `subagents.agentOverrides` 追加这四个 ACP 工具(安全写入:备份 + 校验)。不会自动写入——该命令是唯一的写入路径。升级 pi-subagents 后重新运行即可。git 安装或 fork 请显式传入包目录:`/acp-subagents <installDir>`。
+
 ## 配置
 
 billion-context-pi 开箱即用,无需任何配置——它会自动读取模型的上下文窗口并应用合理的默认值。

@@ -133,6 +133,18 @@ Blocks: 3 active (3.7K summary, 15.2K original compressed)
   b3 (T2)  3.3K→1.0K  age=1m  "Architecture review"
 ```
 
+## `/acp-subagents` command
+
+**Optional, one-time setup — only if you also use [pi-subagents](https://github.com/nicobailon/pi-subagents).**
+
+billion-context-pi's own `acp_delegate` tool works standalone. If you additionally keep pi-subagents installed and want its builtin sub-agents to have ACP context tools (`compress`/`decompress`/`search_context`/`acp_status`) for long-running tasks, run:
+
+```
+/acp-subagents
+```
+
+It discovers the agents and their tool baselines from the installed pi-subagents package and appends the four ACP tools to `subagents.agentOverrides` in `~/.pi/agent/settings.json` (safe write: backup + verify). Nothing is written automatically — this command is the only write path. Re-run it after upgrading pi-subagents. For git installs or forks, pass the package directory explicitly: `/acp-subagents <installDir>`.
+
 ## Configuration
 
 billion-context-pi works out of the box with no configuration — it reads your model's context window automatically and applies sensible defaults.

@@ -1,21 +1,18 @@
 /**
- * Setup: inject ACP context tools into pi-subagents' agent overrides.
+ * One-shot setup: inject ACP context tools into pi-subagents' agent overrides.
+ * Invoked explicitly via the `/acp-subagents` command — never at session
+ * start, so global settings.json is only ever touched on user request.
  *
  * pi-subagents' agentOverrides merge semantics REPLACE the frontmatter
  * `tools` list, so an override without ACP tools strips them from the
  * builtin agents. This module detects an installed pi-subagents package,
  * discovers each builtin agent's frontmatter tools, and writes
  * `subagents.agentOverrides[name].tools = frontmatter tools + ACP tools`.
- *
- * If no compatible pi-subagents installation is detected, nothing is
- * written (issue #179): stale agentOverrides entries for agents that
- * pi-subagents no longer ships must not be created.
  */
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { CONFIG_DIR_NAME } from "@earendil-works/pi-coding-agent";
-import { debug, logError, logWarn } from "./log.js";
 
 /** The four ACP tools to ensure on every pi-subagents builtin agent. */
 export const ACP_TOOLS = ["compress", "decompress", "search_context", "acp_status"] as const;
@@ -31,6 +28,8 @@ export interface SetupOptions {
   agentDir?: string;
   /** Injectable cwd for project-scope detection (defaults to process.cwd()). */
   cwd?: string;
+  /** Explicit install directory (skips detection; for git installs or forks). */
+  installDir?: string;
 }
 
 /**
@@ -172,9 +171,18 @@ export function ensureSubagentAcpTools(settingsPath?: string, options?: SetupOpt
   const cwd = options?.cwd ?? process.cwd();
   const path_ = settingsPath ?? path.join(agentDir, "settings.json");
 
-  const installDir = findPiSubagentsInstall(agentDir, cwd);
-  if (!installDir) {
-    return { path: path_, action: "skipped", reason: "pi-subagents not installed" };
+  let installDir: string;
+  if (options?.installDir) {
+    installDir = path.resolve(options.installDir);
+    if (!fs.existsSync(path.join(installDir, "package.json"))) {
+      return { path: path_, action: "failed", reason: `not a package: ${installDir}` };
+    }
+  } else {
+    const detected = findPiSubagentsInstall(agentDir, cwd);
+    if (!detected) {
+      return { path: path_, action: "skipped", reason: "pi-subagents not installed" };
+    }
+    installDir = detected;
   }
   const builtins = discoverBuiltinAgents(installDir);
   if (builtins.length === 0) {
@@ -278,28 +286,5 @@ export function ensureSubagentAcpTools(settingsPath?: string, options?: SetupOpt
       try { fs.copyFileSync(backupPath, path_); } catch { /* ignore restore failure */ }
     }
     return { path: path_, action: "failed", reason: message };
-  }
-}
-
-/**
- * Run the subagent ACP tools setup and surface a UI notification on success.
- * Safe to call fire-and-forget from the session_start handler.
- */
-export function runSetupAndNotify(notify?: (message: string) => void): void {
-  try {
-    const result = ensureSubagentAcpTools();
-    debug.event("setup-subagent-tools", { action: result.action, reason: result.reason });
-    if (result.action === "updated") {
-      notify?.(`ACP: enabled context tools (compress/decompress/search_context/acp_status) for subagents`);
-    } else if (result.action === "failed") {
-      logWarn("setup", { event: "subagent-tools", action: result.action, reason: result.reason });
-    }
-  } catch (err) {
-    debug.event("setup-subagent-tools-error", { msg: String(err) });
-    logError("setup", {
-      event: "subagent-tools-error",
-      error: err instanceof Error ? err.message : String(err),
-      stack: err instanceof Error ? err.stack ?? "" : "",
-    });
   }
 }

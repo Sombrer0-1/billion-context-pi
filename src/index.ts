@@ -22,7 +22,6 @@ import { wireToolGuardrails } from "./tool-guardrails.js";
 import { debug, logError, logInfo, logWarn, logThrow, closeLogStream } from "./log.js";
 import { collectCoveredMessageIds, estimateTokens, lastUserMessageId, calibrateTokens } from "./tokens.js";
 import { checkForUpdate } from "./update.js";
-import { runSetupAndNotify } from "./setup-subagent-tools.js";
 import {
   THROTTLE_RETRY_ERROR_MESSAGE,
   THROTTLE_KICK_TEXT,
@@ -111,11 +110,6 @@ function wireSessionLifecycle(pi: ExtensionAPI, runtime: AcpRuntime): void {
     void checkForUpdate(runtime.adapter.autoUpdate ?? true, (msg) => {
       if (ctx.hasUI) ctx.ui.notify(msg);
     });
-    // If pi-subagents is installed, idempotently ensure its builtin agents
-    // have ACP context tools (compress/decompress/search_context/acp_status)
-    // in their allowlists (no-op otherwise — see issue #179).
-    // Settings.json is patched safely (backup + optimistic mtime lock + verify).
-    void runSetupAndNotify(ctx.hasUI ? (m) => ctx.ui.notify(m) : undefined);
     // Bind the TUI status widget for async delegates. The widget reads the
     // in-memory runs Map (via runningRunsSnapshot) and renders a live list of
     // running delegates below the editor. Only the interactive TUI has a UI;
