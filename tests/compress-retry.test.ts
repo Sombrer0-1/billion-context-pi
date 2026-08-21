@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { rm } from "node:fs/promises";
 import { createAcpExtension } from "../src/index.js";
 import { createRuntime, MAX_COMPRESS_ATTEMPTS } from "../src/runtime.js";
+import { isCompressSuccessText, isCompressNoopText } from "../src/compress-tool.js";
 
 // Failure-triggered compress retry (session 01a00a38 post-mortem): the model's
 // ONLY compress call in a 3-hour session was rejected by pi's typebox
@@ -56,6 +57,8 @@ function toolResultMsg(id: string, toolCallId: string, text: string, isError: bo
 // handleCompress's own argument checks).
 const VALIDATION_ERR = 'Validation failed for tool "compress":\n  - content.0: must be object\n\nReceived arguments:\n{"content":"[{\\"topic\\":\\"x\\"}]"}';
 const SUCCESS_PANEL = "▣ ACP | 58.5K → 5.7K tokens (~52.8K reclaimed, 4 blocks)";
+const PARTIAL_PANEL = "▣ ACP | 58.5K → 30K tokens (~28.5K reclaimed, 3 blocks)\nErrors: range m00009..m00012: Summary too long";
+const NOOP_PANEL = "▣ ACP | 58.5K → 58.5K tokens (~0 reclaimed, 0 blocks)\nErrors: range m00001..m00002: Requested range(s) already compressed; nothing to compress";
 const NEUTRAL_TEXT = "No ranges provided.";
 
 function fakeCtx(getEntries: () => any[], stateFile: string) {
@@ -311,5 +314,115 @@ test("neutral outcomes freeze the counter; success resets; new turn gets a fresh
   entries = [...entries, userMsg("e7", "next question")];
   const r6 = await fire(handlers, ctx);
   assert.equal(retryMsgs(r6).length, 0, "pre-turn failure out of scope after user message");
+  await rm(`${stateFile}.acp.json`, { force: true });
+});
+
+// ─── issue #6: no-op compress runs must not bypass the retry cap ────────────
+//
+// handleCompress returns a "▣ ACP | …" panel even when blocksCreated === 0
+// (every range skipped: already compressed / below min). The old
+// isCompressSuccessText matched ANY panel prefix → no-op runs counted as
+// success → counter reset → the (dedup-exempt) emergency nudge re-fired on
+// every LLM call → unbounded emergency-nudge ↔ no-op-compress ping-pong.
+
+test("classification: 0-block panels are no-ops, not successes; >=1 block is success", () => {
+  assert.equal(isCompressSuccessText(SUCCESS_PANEL), true);
+  assert.equal(isCompressSuccessText(PARTIAL_PANEL), true, "partial errors with progress still count as success");
+  assert.equal(isCompressSuccessText(NOOP_PANEL), false, "0-block panel must NOT be success (the issue #6 bug)");
+  assert.equal(isCompressSuccessText(NEUTRAL_TEXT), false);
+  assert.equal(isCompressSuccessText("Validation failed"), false);
+  assert.equal(isCompressNoopText(NOOP_PANEL), true);
+  assert.equal(isCompressNoopText(SUCCESS_PANEL), false);
+  assert.equal(isCompressNoopText(PARTIAL_PANEL), false);
+  assert.equal(isCompressNoopText(NEUTRAL_TEXT), false, "non-panels stay neutral");
+});
+
+test("noteCompressOutcomes: no-op panels advance the counter and are retry-eligible", () => {
+  const rt = createRuntime({});
+  const noop = (id: string) => ({ toolCallId: id, isError: false, success: false, noop: true });
+
+  let r = rt.noteCompressOutcomes("u1", [noop("t0")]);
+  assert.equal(r.count, 1);
+  assert.equal(r.retryFor, "t0", "no-op is retry-eligible: model gets corrective guidance");
+
+  r = rt.noteCompressOutcomes("u1", [noop("t0"), noop("t1")]);
+  assert.equal(r.count, 2);
+
+  r = rt.noteCompressOutcomes("u1", [noop("t0"), noop("t1"), noop("t2")]);
+  assert.equal(r.count, 3);
+  assert.equal(r.retryFor, null, "capped after 3 no-ops");
+  assert.equal(r.cappedNow, true);
+  assert.equal(rt.compressRetryCappedFor("u1"), true, "capped state is queryable per turn");
+  assert.equal(rt.compressRetryCappedFor("u2"), false, "other turns are unaffected");
+
+  const success = (id: string) => ({ toolCallId: id, isError: false, success: true, noop: false });
+  r = rt.noteCompressOutcomes("u1", [noop("t0"), noop("t1"), noop("t2"), success("ts")]);
+  assert.equal(r.count, 0, "genuine success lifts the cap");
+  assert.equal(rt.compressRetryCappedFor("u1"), false);
+});
+
+test("no-op compress toolResult triggers the retry nudge and caps at 3 (integration)", async () => {
+  const { api, handlers } = captureApi();
+  createAcpExtension({ modelContextLimit: 200_000 })(api as any);
+  const stateFile = "/tmp/pai-acp-retry-noop.session.json";
+  await rm(`${stateFile}.acp.json`, { force: true });
+
+  let entries: any[] = [userMsg("e1", ZH)];
+  const ctx = fakeCtx(() => entries, stateFile);
+  await fire(handlers, ctx);
+
+  entries = [...entries, toolResultMsg("e2", "call_1", NOOP_PANEL, false)];
+  const r1 = await fire(handlers, ctx);
+  assert.equal(retryMsgs(r1).length, 1, "no-op → corrective retry nudge");
+  assert.match(retryText(r1), /attempt 1 of 3/);
+  assert.match(retryText(r1), /already compressed/, "quotes the skip reason");
+  assert.match(retryText(r1), /acp_status/, "guides to current compressible ranges");
+
+  entries = [...entries, toolResultMsg("e3", "call_2", NOOP_PANEL, false)];
+  const r2 = await fire(handlers, ctx);
+  assert.match(retryText(r2), /attempt 2 of 3/);
+
+  entries = [...entries, toolResultMsg("e4", "call_3", NOOP_PANEL, false)];
+  const r3 = await fire(handlers, ctx);
+  assert.equal(retryMsgs(r3).length, 0, "third no-op → capped, no more prompts");
+  await rm(`${stateFile}.acp.json`, { force: true });
+});
+
+test("emergency nudge stops re-injecting once the turn's retry cap is burned (issue #6 loop breaker)", async () => {
+  const { api, handlers } = captureApi();
+  createAcpExtension({ modelContextLimit: 180_000 })(api as any);
+  const stateFile = "/tmp/pai-acp-retry-emerg.session.json";
+  await rm(`${stateFile}.acp.json`, { force: true });
+
+  // ~270K tokens of sent view vs a 180K window → kernel goes EMERGENCY and
+  // the nudge re-injects on every context fire (dedup bypass).
+  const MID = "lorem ".repeat(3000);
+  const roleMsg = (id: string, role: string, text: string) => ({
+    type: "message", id, parentId: null, timestamp: "",
+    message: { role, content: text, timestamp: Date.now() },
+  });
+  let entries: any[] = [roleMsg("e0", "user", "start " + MID)];
+  for (let i = 1; i <= 59; i++) entries.push(roleMsg(`e${i}`, i % 2 ? "assistant" : "user", `f${i} ` + MID));
+  const ctx = fakeCtx(() => entries, stateFile);
+  const nudgeCount = (r: any) =>
+    (r?.messages ?? []).filter((m: any) => m.role === "user" && /Context limit reached/.test(JSON.stringify(m.content))).length;
+
+  const r0 = await fire(handlers, ctx);
+  assert.ok(nudgeCount(r0) >= 1, "emergency nudge fires on real overflow");
+  assert.equal(retryMsgs(r0).length, 0);
+
+  // model "answers" each emergency nudge with a no-op compress (stale refs)
+  for (let i = 1; i <= 3; i++) {
+    entries = [...entries, toolResultMsg(`ec${i}`, `call_${i}`, NOOP_PANEL, false)];
+    await fire(handlers, ctx);
+  }
+  const rCapped = await fire(handlers, ctx);
+  assert.equal(nudgeCount(rCapped), 0, "retry cap burned → emergency nudge no longer re-injects");
+  assert.equal(retryMsgs(rCapped).length, 0, "retry prompts also capped");
+
+  // a genuine success lifts the cap → emergency guidance resumes
+  entries = [...entries, toolResultMsg("ec4", "call_4", SUCCESS_PANEL, false)];
+  const rRe = await fire(handlers, ctx);
+  assert.ok(nudgeCount(rRe) >= 1, "after a successful compress the emergency nudge may resume");
   await rm(`${stateFile}.acp.json`, { force: true });
 });

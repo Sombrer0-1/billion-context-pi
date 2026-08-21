@@ -70,12 +70,16 @@ export interface AcpRuntime {
   nudgeShownFor(turnKey: string): boolean;
   /** Process compress toolResults for the CURRENT user turn only (the caller
    *  scopes the list — see collectCompressOutcomes in src/index.ts); idempotent
-   *  per toolCallId. Outcome classes: isError → failure (count++), success
-   *  panel text → reset, other non-error text → neutral (count unchanged).
-   *  Returns the failure count, the toolCallId of the newest failure that
-   *  still needs a retry prompt (null when none, capped, or count 0), and
-   *  whether the cap was just reached by this call. */
-  noteCompressOutcomes(turnKey: string, outcomes: ReadonlyArray<{ toolCallId: string; isError: boolean; success: boolean }>): { count: number; retryFor: string | null; cappedNow: boolean };
+   *  per toolCallId. Outcome classes: isError or noop (0-block panel) →
+   *  failure (count++), success panel (>= 1 block) → reset, other non-error
+   *  text → neutral (count unchanged). Returns the failure count, the
+   *  toolCallId of the newest failure that still needs a retry prompt (null
+   *  when none, capped, or count 0), and whether the cap was just reached. */
+  noteCompressOutcomes(turnKey: string, outcomes: ReadonlyArray<{ toolCallId: string; isError: boolean; success: boolean; noop?: boolean }>): { count: number; retryFor: string | null; cappedNow: boolean };
+  /** True when this turn already burned MAX_COMPRESS_ATTEMPTS failed/no-op
+   *  compress calls — used to stop re-injecting the (dedup-exempt) emergency
+   *  nudge that would otherwise keep looping no-op compressions (issue #6). */
+  compressRetryCappedFor(turnKey: string): boolean;
   clearNudgeTracking(): void;
   clearCompressRetryTracking(): void;
   liveContextLimit(ctx: ExtensionContext): number;
@@ -286,7 +290,7 @@ export function createRuntime(adapter: AdapterConfig): AcpRuntime {
   let compressFailTurnKey: string | null = null;
   let compressFailCount = 0;
 
-  function noteCompressOutcomes(turnKey: string, outcomes: ReadonlyArray<{ toolCallId: string; isError: boolean; success: boolean }>): { count: number; retryFor: string | null; cappedNow: boolean } {
+  function noteCompressOutcomes(turnKey: string, outcomes: ReadonlyArray<{ toolCallId: string; isError: boolean; success: boolean; noop?: boolean }>): { count: number; retryFor: string | null; cappedNow: boolean } {
     if (compressFailTurnKey !== turnKey) {
       compressFailTurnKey = turnKey;
       compressFailCount = 0;
@@ -295,7 +299,7 @@ export function createRuntime(adapter: AdapterConfig): AcpRuntime {
     for (const o of outcomes) {
       if (compressOutcomeSeen.has(o.toolCallId)) continue;
       compressOutcomeSeen.add(o.toolCallId);
-      if (o.isError) {
+      if (o.isError || o.noop === true) {
         compressFailCount += 1;
       } else if (o.success) {
         compressFailCount = 0;
@@ -306,9 +310,13 @@ export function createRuntime(adapter: AdapterConfig): AcpRuntime {
     // count >= 1 guards against a deduped stale failure sliding in with a
     // reset-to-0 counter (defense in depth; the caller's turn scoping already
     // prevents it — an "attempt 0 of 3" prompt must be impossible).
-    const retryFor = latest && latest.isError && compressFailCount >= 1 && compressFailCount < MAX_COMPRESS_ATTEMPTS ? latest.toolCallId : null;
+    const retryFor = latest && (latest.isError || latest.noop === true) && compressFailCount >= 1 && compressFailCount < MAX_COMPRESS_ATTEMPTS ? latest.toolCallId : null;
     const cappedNow = compressFailCount >= MAX_COMPRESS_ATTEMPTS && prevCount < MAX_COMPRESS_ATTEMPTS;
     return { count: compressFailCount, retryFor, cappedNow };
+  }
+
+  function compressRetryCappedFor(turnKey: string): boolean {
+    return compressFailTurnKey === turnKey && compressFailCount >= MAX_COMPRESS_ATTEMPTS;
   }
 
   function clearCompressRetryTracking(): void {
@@ -402,4 +410,4 @@ export function createRuntime(adapter: AdapterConfig): AcpRuntime {
     lastActiveBlockIds.delete(sid);
   }
 
-  return { core, store, density, setCountModel: (m) => { countModelId = m; }, noteActiveBlocks, clearSessionTracking, get adapter() { return adapterRef; }, setAdapter: (a) => { adapterRef = a; }, get prompts() { return promptsRef; }, setPrompts: (p) => { promptsRef = p; }, markNudgeShown: (k) => { nudgeShownTurns.add(k); }, nudgeShownFor: (k) => nudgeShownTurns.has(k), clearNudgeTracking: () => { nudgeShownTurns.clear(); }, noteCompressOutcomes, clearCompressRetryTracking, liveContextLimit, configFor, reloadConfig, stateFor, save, acquireLock, overflowFor, overflowDrop, throttleFor, throttleDrop };}
+  return { core, store, density, setCountModel: (m) => { countModelId = m; }, noteActiveBlocks, clearSessionTracking, get adapter() { return adapterRef; }, setAdapter: (a) => { adapterRef = a; }, get prompts() { return promptsRef; }, setPrompts: (p) => { promptsRef = p; }, markNudgeShown: (k) => { nudgeShownTurns.add(k); }, nudgeShownFor: (k) => nudgeShownTurns.has(k), clearNudgeTracking: () => { nudgeShownTurns.clear(); }, noteCompressOutcomes, compressRetryCappedFor, clearCompressRetryTracking, liveContextLimit, configFor, reloadConfig, stateFor, save, acquireLock, overflowFor, overflowDrop, throttleFor, throttleDrop };}
