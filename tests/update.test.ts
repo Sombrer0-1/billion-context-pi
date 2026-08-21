@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { join } from "node:path";
 import { homedir, tmpdir } from "node:os";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, mkdirSync, writeFileSync } from "node:fs";
 import { CONFIG_DIR_NAME } from "@earendil-works/pi-coding-agent";
 import type { NpmRunner } from "../src/update.js";
 
@@ -27,8 +27,11 @@ const {
   checkForUpdate,
   findNpmRoot,
   setRunNpmForTest,
+  setRunNodeForTest,
+  autoInstallLatest,
   isNewer,
   runNpm,
+  runNode,
 } = await import("../src/update.js");
 
 const THROTTLE = join(
@@ -242,4 +245,117 @@ test("findNpmRoot locates the package root when nested under node_modules", () =
 
 test("findNpmRoot terminates when no node_modules ancestor exists (no Windows infinite loop)", { timeout: 2000 }, () => {
   assert.equal(findNpmRoot(homedir()), undefined);
+});
+
+// --- install path (fixture layout; real runner not under node_modules) ---
+
+type Fixture = {
+  root: string;
+  extDir: string;
+  writeInstalled(version: string, opts?: { brokenEntry?: boolean }): void;
+};
+
+function makeFixture(): Fixture {
+  const root = mkdtempSync(join(tmpdir(), "acp-install-test-"));
+  const extDir = join(root, "node_modules", "billion-context-pi");
+  return {
+    root,
+    extDir,
+    writeInstalled(version: string, opts?: { brokenEntry?: boolean }): void {
+      const dist = join(extDir, "dist");
+      mkdirSync(dist, { recursive: true });
+      const body = opts?.brokenEntry
+        ? "export const broken = (!!"
+        : "export const loaded = true;\n";
+      writeFileSync(join(dist, "index.js"), body);
+      writeFileSync(
+        join(extDir, "package.json"),
+        JSON.stringify(
+          {
+            name: "billion-context-pi",
+            version,
+            main: "dist/index.js",
+            exports: { ".": { import: "./dist/index.js" } },
+            pi: { extensions: ["./dist/index.js"] },
+          },
+          null,
+          2,
+        ),
+      );
+    },
+  };
+}
+
+test("autoInstallLatest: clean install verifies (real smoke import) and reports ok", { timeout: 60_000 }, async () => {
+  const fx = makeFixture();
+  fx.writeInstalled("9.9.9");
+  const { impl, calls } = makeFakeNpm(
+    { code: 0, stdout: "", stderr: "" },
+    { code: 0, stdout: "", stderr: "" },
+  );
+  // install succeeded → put the new version on disk, as npm would
+  const impl2: NpmRunner = async (args, opts) => {
+    const res = await impl(args, opts);
+    if (args[0] === "install") fx.writeInstalled("9.9.9");
+    return res;
+  };
+  setRunNpmForTest(impl2);
+  setRunNodeForTest(runNode); // real child process for the smoke import
+  const outcome = await autoInstallLatest("9.9.9", fx.extDir);
+  assert.equal(outcome, "ok");
+  assert.ok(
+    calls.some((c) => c.args.includes("billion-context-pi@9.9.9") && c.args.includes("--no-save")),
+  );
+  rmSync(fx.root, { recursive: true, force: true });
+});
+
+test("autoInstallLatest: syntax-broken entry fails verify → rolls back to previous version", { timeout: 60_000 }, async () => {
+  const fx = makeFixture();
+  fx.writeInstalled("1.2.3"); // previously-installed = rollback target
+  const { impl, calls } = makeFakeNpm(
+    { code: 0, stdout: "", stderr: "" },
+    { code: 0, stdout: "", stderr: "" },
+  );
+  const impl2: NpmRunner = async (args, opts) => {
+    const res = await impl(args, opts);
+    if (args[0] !== "install" || !args[1]) return res;
+    if (args[1].includes("@9.9.9")) {
+      // broken publish: exit 0, but the entry has a syntax error
+      fx.writeInstalled("9.9.9", { brokenEntry: true });
+    } else if (args[1].includes("@1.2.3")) {
+      // rollback: npm puts the working previous version back on disk
+      fx.writeInstalled("1.2.3");
+    }
+    return res;
+  };
+  setRunNpmForTest(impl2);
+  setRunNodeForTest(runNode);
+  const outcome = await autoInstallLatest("9.9.9", fx.extDir);
+  assert.equal(outcome, "rolled-back");
+  const versions = calls.filter((c) => c.args[0] === "install").map((c) => c.args[1]);
+  assert.deepEqual(versions, ["billion-context-pi@9.9.9", "billion-context-pi@1.2.3"]);
+  // and the disk is back to the working previous version
+  const pkg = JSON.parse(readFileSync(join(fx.extDir, "package.json"), "utf-8")) as {
+    version: string;
+  };
+  assert.equal(pkg.version, "1.2.3");
+  rmSync(fx.root, { recursive: true, force: true });
+});
+
+test("autoInstallLatest: npm install failure → failed, no rollback, no verify", { timeout: 30_000 }, async () => {
+  const fx = makeFixture();
+  fx.writeInstalled("1.2.3");
+  let nodeCalls = 0;
+  setRunNpmForTest(makeFakeNpm(
+    { code: 0, stdout: "", stderr: "" },
+    { code: 1, stdout: "", stderr: "E404" },
+  ).impl);
+  setRunNodeForTest(async () => {
+    nodeCalls += 1;
+    return { code: 0, stdout: "", stderr: "" };
+  });
+  const outcome = await autoInstallLatest("9.9.9", fx.extDir);
+  assert.equal(outcome, "failed");
+  assert.equal(nodeCalls, 0);
+  rmSync(fx.root, { recursive: true, force: true });
 });
