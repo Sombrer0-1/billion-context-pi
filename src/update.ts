@@ -18,11 +18,38 @@ const THROTTLE_FILE = join(homedir(), CONFIG_DIR_NAME, "agent", ".billion-contex
 // so several can race past the throttle read before any writes the timestamp.
 let updateInFlight = false;
 
+export type NpmRunner = (
+  args: string[],
+  opts: { cwd?: string; timeout: number },
+) => Promise<{ code: number; stdout: string; stderr: string }>;
+
+export const runNpm: NpmRunner = async (args, opts) => {
+  return new Promise((resolve) => {
+    execFile(
+      "npm",
+      args,
+      { ...opts, shell: process.platform === "win32", maxBuffer: 4 * 1024 * 1024 },
+      (err, stdout, stderr) =>
+        resolve({
+          code: err ? 1 : 0,
+          stdout: String(stdout ?? ""),
+          stderr: String(stderr ?? ""),
+        }),
+    );
+  });
+};
+
+let runNpmImpl: NpmRunner = runNpm;
+
+export function setRunNpmForTest(impl: NpmRunner): void {
+  runNpmImpl = impl;
+}
+
 function parseVersion(v: string): number[] {
   return v.replace(/^v/, "").split(".").map((n) => parseInt(n, 10) || 0);
 }
 
-function isNewer(latest: string, current: string): boolean {
+export function isNewer(latest: string, current: string): boolean {
   const l = parseVersion(latest);
   const c = parseVersion(current);
   for (let i = 0; i < 3; i++) {
@@ -92,22 +119,77 @@ async function autoInstallLatest(latest: string): Promise<boolean> {
   // version can never be interpreted as a command even if it slipped through.
   if (!SEMVER_RE.test(latest)) return false;
   const extDir = await findExtensionDir();
-  if (!extDir) return false;
+  if (!extDir) {
+    logWarn("update", { event: "install-skip", reason: "extension-dir-not-found" });
+    return false;
+  }
   const npmDir = findNpmRoot(extDir);
-  if (!npmDir) return false;
+  if (!npmDir) {
+    logWarn("update", { event: "install-skip", reason: "not-under-node-modules", extDir });
+    return false;
+  }
 
   try {
-    const code = await new Promise<number>((resolve) => {
-      execFile(
-        "npm",
-        ["install", `${PACKAGE_NAME}@${latest}`, "--silent", "--no-audit", "--no-fund"],
-        { cwd: npmDir, timeout: 60_000, shell: process.platform === "win32" },
-        (err) => resolve(err ? 1 : 0),
-      );
-    });
+    const { code, stderr } = await runNpmImpl(
+      ["install", `${PACKAGE_NAME}@${latest}`, "--silent", "--no-audit", "--no-fund"],
+      { cwd: npmDir, timeout: 60_000 },
+    );
+    if (code !== 0) {
+      logWarn("update", {
+        event: "auto-install-failed",
+        latest,
+        npmDir,
+        stderr: stderr.trim().slice(-2000),
+      });
+    }
     return code === 0;
-  } catch {
+  } catch (e) {
+    logWarn("update", {
+      event: "auto-install-error",
+      latest,
+      error: e instanceof Error ? e.message : String(e),
+    });
     return false;
+  }
+}
+
+async function fetchLatestVersion(): Promise<string | undefined> {
+  // Prefer `npm view`: it honors the user's registry/proxy/auth config (mirrors,
+  // corporate proxies) — the same toolchain as the install step. A direct fetch
+  // to registry.npmjs.org fails on machines that only reach npm via a mirror or
+  // proxy (Node fetch ignores HTTP_PROXY/HTTPS_PROXY).
+  try {
+    const { code, stdout } = await runNpmImpl(["view", PACKAGE_NAME, "version"], {
+      timeout: 20_000,
+    });
+    if (code === 0) {
+      const v = stdout
+        .trim()
+        .split("\n")
+        .map((s) => s.trim())
+        .filter(Boolean)
+        .pop();
+      if (v && SEMVER_RE.test(v)) return v;
+    }
+  } catch {
+  }
+  try {
+    const res = await fetch(REGISTRY_URL, {
+      signal: AbortSignal.timeout(10_000),
+      headers: { Accept: "application/json" },
+    });
+    if (!res.ok) {
+      logWarn("update", { event: "check-http", status: res.status });
+      return undefined;
+    }
+    const data = (await res.json()) as { version?: string };
+    return data.version;
+  } catch (e) {
+    logWarn("update", {
+      event: "check-fetch-error",
+      error: e instanceof Error ? e.message : String(e),
+    });
+    return undefined;
   }
 }
 
@@ -135,17 +217,7 @@ export async function checkForUpdate(
     await writeLastCheck(now);
 
     const runtimeVersion = await getRuntimeVersion();
-
-    const res = await fetch(REGISTRY_URL, {
-      signal: AbortSignal.timeout(5000),
-      headers: { Accept: "application/json" },
-    });
-    if (!res.ok) {
-      logWarn("update", { event: "check-http", status: res.status });
-      return;
-    }
-    const data = (await res.json()) as { version?: string };
-    const latest = data.version;
+    const latest = await fetchLatestVersion();
     if (!latest) return;
 
     const current = runtimeVersion ?? CURRENT_VERSION;
