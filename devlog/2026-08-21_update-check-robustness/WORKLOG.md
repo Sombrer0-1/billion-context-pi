@@ -21,7 +21,7 @@
 | `0173f55` | fix(update): check latest via npm view, log install failures |
 | `f7378f0` | fix(update): await update check in headless mode so process exit cannot kill an in-flight install |
 | `a3782f2` | test: isolate update-check throttle file across parallel test processes |
-| (next) | fix(update): verify installs and roll back broken publishes (anti-brick) |
+| `88e1f71` | fix(update): verify installs and roll back broken publishes (anti-brick) |
 
 ### Key Files
 
