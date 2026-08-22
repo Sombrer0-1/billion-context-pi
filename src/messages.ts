@@ -118,6 +118,16 @@ export function extractText(content: unknown): string {
 function stripRefTag(text: string): string {
   return text.replace(REF_TAG, "").replace(TRAILING_REF_TAG, "");
 }
+
+export function countImageBlocks(content: unknown): number {
+  if (!Array.isArray(content)) return 0;
+  let n = 0;
+  for (const block of content) {
+    const b = block as { type?: string };
+    if (b?.type === "image") n++;
+  }
+  return n;
+}
 export function messageIdentity(message: unknown): string {
   return JSON.stringify(normalizeIdentityValue(message, true));
 }

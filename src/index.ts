@@ -19,7 +19,7 @@ import { buildAcpSystemPrompt, ACP_DELEGATE_PROMPT } from "./system-prompt.js";
 import { delegateStatusWidget } from "./fleet-widget.js";
 import { wireToolGuardrails } from "./tool-guardrails.js";
 import { debug, logError, logInfo, logWarn, logThrow, closeLogStream } from "./log.js";
-import { collectCoveredMessageIds, estimateTokens, lastUserMessageId, calibrateTokens } from "./tokens.js";
+import { collectCoveredMessageIds, estimateTokens, lastUserMessageId, calibrateTokens, collectImageTokens, modelSupportsImages } from "./tokens.js";
 import { checkForUpdate } from "./update.js";
 import {
   THROTTLE_RETRY_ERROR_MESSAGE,
@@ -190,7 +190,7 @@ function wireContextTransform(pi: ExtensionAPI, runtime: AcpRuntime): void {
       const realUsage = ctx.getContextUsage?.();
       const systemPromptText = getSystemPromptText(ctx);
       const systemPromptTokens = systemPromptText ? defaultCountTokens(systemPromptText) : 0;
-      const sentTokens = estimateTokens(coreMessages, coveredIds) + systemPromptTokens;
+      const sentTokens = estimateTokens(coreMessages, coveredIds, collectImageTokens(entries, modelSupportsImages(ctx.model))) + systemPromptTokens;
       // Usage/emergency arbitration on the CALIBRATED sent view: density is
       // the provider-anchored real/estimate ratio learned by the estimator
       // (docs/token-calibration-plan.md §3.2). Raw CJK-aware estimates

@@ -1,4 +1,8 @@
 import { defaultCountTokens, type CoreMessage } from "acp-kernel";
+import type { SessionMessageEntry } from "@earendil-works/pi-coding-agent";
+import { countImageBlocks } from "./messages.js";
+
+type AgentMessage = SessionMessageEntry["message"];
 
 export function collectCoveredMessageIds(state: { blocks: { active: boolean; effectiveMessageIds: string[] }[] }): Set<string> {
   const ids = new Set<string>();
@@ -9,12 +13,35 @@ export function collectCoveredMessageIds(state: { blocks: { active: boolean; eff
   return ids;
 }
 
-export function estimateTokens(messages: CoreMessage[], coveredIds?: Set<string>): number {
+// ~Anthropic screenshot cost; real per-model cost (85..2.8K) converges via density calibration.
+export const IMAGE_TOKEN_COST = 1600;
+
+// pi-ai silently drops image blocks for non-vision models, so they cost nothing there.
+export function modelSupportsImages(model: unknown): boolean {
+  const input = (model as { input?: string[] } | null | undefined)?.input;
+  return Array.isArray(input) && input.includes("image");
+}
+
+// Keyed by entry id — the core id of user/toolResult messages (assistant tool-call cores split as `${id}#callId` and never carry images).
+export function collectImageTokens(entries: { id: string; type?: string; message?: AgentMessage }[], visionCapable: boolean): Map<string, number> {
+  const out = new Map<string, number>();
+  if (!visionCapable) return out;
+  for (const e of entries) {
+    if (e.type !== "message") continue;
+    const n = countImageBlocks((e.message as { content?: unknown } | undefined)?.content);
+    if (n > 0) out.set(e.id, n * IMAGE_TOKEN_COST);
+  }
+  return out;
+}
+
+export function estimateTokens(messages: CoreMessage[], coveredIds?: Set<string>, imageTokensById?: Map<string, number>): number {
   let tokens = 0;
   for (const m of messages) {
     if (m.toolName === "compress") continue;
     if (coveredIds?.has(m.id)) continue;
     tokens += defaultCountTokens(m.text ?? "");
+    const img = imageTokensById?.get(m.id);
+    if (img) tokens += img;
   }
   return tokens;
 }

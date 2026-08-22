@@ -6,7 +6,7 @@ import type {
 } from "@earendil-works/pi-coding-agent";
 import type { AcpRuntime } from "./runtime.js";
 import { debug, logError, logInfo, logThrow, logWarn } from "./log.js";
-import { estimateTokens, collectCoveredMessageIds, calibrateTokens } from "./tokens.js";
+import { estimateTokens, collectCoveredMessageIds, calibrateTokens, collectImageTokens, modelSupportsImages } from "./tokens.js";
 import { defaultCountTokens, parseCompressArgs, type CompressionBlock, type CompressParseDiagnostics } from "acp-kernel";
 import { getSystemPromptText } from "./compat.js";
 
@@ -146,14 +146,15 @@ async function handleCompress(args: CompressArgs, runtime: AcpRuntime, ctx: Exte
   if (typeof maybeRanges === "string") throw new Error(maybeRanges);
   const ranges = maybeRanges;
   if (ranges.length === 0) return "No ranges provided.";
-  const { state: initialState, coreMessages } = await runtime.stateFor(ctx);
+  const { state: initialState, coreMessages, entries } = await runtime.stateFor(ctx);
   const config = runtime.configFor(ctx);
   // Sent-view arbitration — the same scale as the context transform and
   // acp_status (see src/index.ts): never the session-tree tokenCount.
   const modelId = (ctx.model as { id?: string } | undefined)?.id ?? "default";
   const systemPromptText = getSystemPromptText(ctx);
   const systemPromptTokens = systemPromptText ? defaultCountTokens(systemPromptText) : 0;
-  const sentTokens = estimateTokens(coreMessages, collectCoveredMessageIds(initialState)) + systemPromptTokens;
+  const imageTokens = collectImageTokens(entries, modelSupportsImages(ctx.model));
+  const sentTokens = estimateTokens(coreMessages, collectCoveredMessageIds(initialState), imageTokens) + systemPromptTokens;
   const turn = runtime.core.processTurn({
     messages: coreMessages,
     state: initialState,
@@ -166,7 +167,7 @@ async function handleCompress(args: CompressArgs, runtime: AcpRuntime, ctx: Exte
   // the same scale as the kernel's injected countTokens (which already carries
   // density), so the numbers the model sees match real usage.
   const density = runtime.density.densityFor(modelId);
-  const beforeTokens = calibrateTokens(estimateTokens(messages, collectCoveredMessageIds(state)), density);
+  const beforeTokens = calibrateTokens(estimateTokens(messages, collectCoveredMessageIds(state), imageTokens), density);
   const summaryMaxChars = args.summaryMaxChars;
   const topLevelTopic = args.topic;
 
@@ -215,7 +216,7 @@ async function handleCompress(args: CompressArgs, runtime: AcpRuntime, ctx: Exte
     config,
     tokenCount: calibrateTokens(sentTokens, density),
   });
-  const afterTokens = calibrateTokens(estimateTokens(afterTurn.messages, collectCoveredMessageIds(applied.state)), density);
+  const afterTokens = calibrateTokens(estimateTokens(afterTurn.messages, collectCoveredMessageIds(applied.state), imageTokens), density);
   const reclaimed = Math.max(0, beforeTokens - afterTokens);
 
   const newBlocks = applied.state.blocks.slice(-blocksCreated);

@@ -2,7 +2,7 @@ import type { ExtensionCommandContext, RegisteredCommand, SessionEntry } from "@
 import type { AcpRuntime } from "./runtime.js";
 import { defaultCountTokens, parseBlockIdArg, collectBlockContent } from "acp-kernel";
 import { getSystemPromptText } from "./compat.js";
-import { collectCoveredMessageIds, estimateTokens, calibrateTokens } from "./tokens.js";
+import { collectCoveredMessageIds, estimateTokens, calibrateTokens, collectImageTokens, modelSupportsImages } from "./tokens.js";
 import { buildStatusPanel } from "acp-kernel/panel";
 import { getDelegateUsage } from "./delegate-tool.js";
 import { ensureSubagentAcpTools } from "./setup-subagent-tools.js";
@@ -128,10 +128,12 @@ async function statusReport(runtime: AcpRuntime, ctx: ExtensionCommandContext): 
   // EMERGENCY at 204%). The tree-scale number stays in the log only.
   const systemPromptText = getSystemPromptText(ctx);
   const systemPromptTokens = systemPromptText ? defaultCountTokens(systemPromptText) : 0;
-  const sessionTokens = realUsage?.tokens && realUsage.tokens > 0 ? realUsage.tokens : defaultCountTokens(coreMessages.map((m) => m.text ?? "").join("\n"));
+  const imageTokens = collectImageTokens(entries, modelSupportsImages(ctx.model));
+  const imageTokensTotal = [...imageTokens.values()].reduce((a, b) => a + b, 0);
+  const sessionTokens = realUsage?.tokens && realUsage.tokens > 0 ? realUsage.tokens : defaultCountTokens(coreMessages.map((m) => m.text ?? "").join("\n")) + imageTokensTotal;
   const coveredIds = collectCoveredMessageIds(state);
   const modelId = (ctx.model as { id?: string } | undefined)?.id ?? "default";
-  const sentTokens = estimateTokens(coreMessages, coveredIds) + systemPromptTokens;
+  const sentTokens = estimateTokens(coreMessages, coveredIds, imageTokens) + systemPromptTokens;
   const turn = runtime.core.processTurn({ messages: coreMessages, state, config, tokenCount: calibrateTokens(sentTokens, runtime.density.densityFor(modelId)) });
 
   // Shared kit surface renders the panel (dual accounting, viability
@@ -147,7 +149,7 @@ async function statusReport(runtime: AcpRuntime, ctx: ExtensionCommandContext): 
     state: turn.state,
     nudge: turn.nudge,
     modelContextLimit: config.modelContextLimit,
-    unprunedTokens: coreMessages.reduce((sum, m) => sum + defaultCountTokens(m.text ?? ""), 0),
+    unprunedTokens: coreMessages.reduce((sum, m) => sum + defaultCountTokens(m.text ?? "") + (imageTokens.get(m.id) ?? 0), 0),
     cacheUsages: cacheUsageSamples(entries ?? []),
   });
 
