@@ -1,10 +1,9 @@
 import { Type, type Static } from "typebox";
 import type { AgentToolResult, ExtensionContext, ToolDefinition } from "@earendil-works/pi-coding-agent";
 import type { AcpRuntime } from "./runtime.js";
-import { buildStatusReport, defaultCountTokens, formatRanges } from "acp-kernel";
+import { buildStatusReport, defaultCountTokens, formatRanges, viableRanges } from "acp-kernel";
 import { estimateTokens, collectCoveredMessageIds, calibrateTokens } from "./tokens.js";
 import { getSystemPromptText } from "./compat.js";
-import { viableRanges } from "billion-context-kit";
 import { logThrow } from "./log.js";
 import { getDelegateUsage } from "./delegate-tool.js";
 import { resolveDelegate } from "./config.js";

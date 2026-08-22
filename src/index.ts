@@ -5,7 +5,7 @@ import type {
   SessionMessageEntry,
 } from "@earendil-works/pi-coding-agent";
 import type { CoreMessage, NudgeDecision, CompressionBlock, Prompts } from "acp-kernel";
-import { renderNudgeText, resolvePrompts, defaultPrompts } from "acp-kernel";
+import { renderNudgeText, resolvePrompts, defaultPrompts, viableRanges } from "acp-kernel";
 import { type AdapterConfig, resolveDelegate } from "./config.js";
 import { createRuntime, type AcpRuntime, MAX_COMPRESS_ATTEMPTS } from "./runtime.js";
 import { makeCompressTool, isCompressSuccessText, isCompressNoopText } from "./compress-tool.js";
@@ -15,7 +15,6 @@ import { makeStatusTool } from "./status-tool.js";
 import { makeDelegateTool, makeDelegateWaitTool, makeDelegateCancelTool, runningRunsSnapshot, resetDelegateUsage, setDelegateDisplayUsage } from "./delegate-tool.js";
 import { makeCommands } from "./commands.js";
 import { coreOutToAgentMessages, extractText } from "./messages.js";
-import { viableRanges } from "billion-context-kit";
 import { buildAcpSystemPrompt, ACP_DELEGATE_PROMPT } from "./system-prompt.js";
 import { delegateStatusWidget } from "./fleet-widget.js";
 import { wireToolGuardrails } from "./tool-guardrails.js";
@@ -311,7 +310,7 @@ function wireContextTransform(pi: ExtensionAPI, runtime: AcpRuntime): void {
       const emergency = turn.nudge.breakdown?.emergencyOverride === 1;
       // Recommend only ranges the model can actually compress: a tiny
       // fragmented range in the list makes batched attempts fail atomically
-      // (kernel validates the whole batch). See viableRanges in billion-context-kit.
+      // (kernel validates the whole batch). See viableRanges in acp-kernel.
       turn.nudge.compressibleRanges = viableRanges(turn.nudge.compressibleRanges);
       // Retry-cap circuit breaker (issue #6): emergency nudges re-inject on
       // every LLM call, so a model answering each one with a failed/no-op
