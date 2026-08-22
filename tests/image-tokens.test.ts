@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { rm } from "node:fs/promises";
+import { readFile, rm } from "node:fs/promises";
 import { createAcpExtension } from "../src/index.js";
 import { estimateTokens, collectImageTokens, modelSupportsImages, IMAGE_TOKEN_COST } from "../src/tokens.js";
 import { countImageBlocks } from "../src/messages.js";
@@ -105,16 +105,62 @@ test("estimateTokens adds image tokens and skips covered ids", () => {
   assert.equal(estimateTokens(msgs, new Set(["m1"]), imageTokens), 4);
 });
 
-test("images count toward sent-view arbitration (vision model)", async () => {
-  await rm(`${STATE_FILE}.acp.json`, { force: true });
+const lastTurnLine = async (logFile: string) => {
+  const lines = (await readFile(logFile, "utf8")).split("\n").filter((l) => l.includes("[turn]"));
+  return lines[lines.length - 1] ?? "";
+};
+
+test("sent-view token count includes image tokens (vision model)", async () => {
+  const logFile = `${STATE_FILE}.vision.log`;
+  await rm(logFile, { force: true });
+  process.env.ACP_LOG_FILE = logFile;
   const { api, handlers } = captureApi();
   createAcpExtension({ modelContextLimit: 10_000 })(api as any);
   const entries = Array.from({ length: 8 }, (_, i) => imgEntry(`e${i}`));
   const ctx = ctxWithModel(entries, 10_000, ["text", "image"]);
+  await handlers.get("context")![0]!({ type: "context", messages: entries.map((e) => e.message) }, ctx);
+  // 8 × 1600 = 12800 → 128% of the 10K window, despite empty visible text.
+  assert.match(await lastTurnLine(logFile), /tokens=12800 pct=128 limit=10000/, "image tokens must land in the sent-view estimate");
+  await rm(logFile, { force: true });
+});
+
+test("sent-view token count ignores images for non-vision models", async () => {
+  const logFile = `${STATE_FILE}.novision.log`;
+  await rm(logFile, { force: true });
+  process.env.ACP_LOG_FILE = logFile;
+  const { api, handlers } = captureApi();
+  createAcpExtension({ modelContextLimit: 10_000 })(api as any);
+  const entries = Array.from({ length: 8 }, (_, i) => imgEntry(`e${i}`));
+  const ctx = ctxWithModel(entries, 10_000, ["text"]);
+  await handlers.get("context")![0]!({ type: "context", messages: entries.map((e) => e.message) }, ctx);
+  // pi-ai silently drops image blocks for non-vision models — counting them
+  // would fabricate 12.8K of phantom usage.
+  const m = (await lastTurnLine(logFile)).match(/tokens=(\d+)/);
+  assert.ok(m, "[turn] line present");
+  assert.ok(Number(m[1]) < 1000, `non-vision model must not count image tokens, got ${m[1]}`);
+  await rm(logFile, { force: true });
+});
+
+test("emergency nudge fires when images push the sent view past the window", async () => {
+  await rm(`${STATE_FILE}.acp.json`, { force: true });
+  const { api, handlers } = captureApi();
+  createAcpExtension({ modelContextLimit: 10_000 })(api as any);
+  const filler = "lorem ".repeat(300);
+  const entries = [
+    ...Array.from({ length: 30 }, (_, i) => ({
+      type: "message",
+      id: `f${i}`,
+      parentId: null,
+      timestamp: "",
+      message: { role: i % 2 ? "assistant" : "user", content: `${i} ${filler}`, timestamp: Date.now() },
+    })),
+    ...Array.from({ length: 8 }, (_, i) => imgEntry(`e${i}`)),
+  ];
+  const ctx = ctxWithModel(entries, 10_000, ["text", "image"]);
   const r = await handlers.get("context")![0]!({ type: "context", messages: entries.map((e) => e.message) }, ctx);
-  // 8 × 1600 = 12.8K > 10K window — the nudge must fire even though the
-  // visible text of every message is empty.
-  assert.ok(nudgeCount(r) >= 1, "image tokens must push the sent view past the window");
+  // ~30 × 450 filler + 8 × 1600 images ≈ 26K vs 10K window; the older filler
+  // sits outside the recent-protection window, so a compressible range exists.
+  assert.ok(nudgeCount(r) >= 1, "filler + images must overflow the window and trip the nudge");
   await rm(`${STATE_FILE}.acp.json`, { force: true });
 });
 
@@ -126,19 +172,6 @@ test("identical text-only session stays quiet (same window)", async () => {
   const ctx = ctxWithModel(entries, 10_000, ["text", "image"]);
   const r = await handlers.get("context")![0]!({ type: "context", messages: entries.map((e) => e.message) }, ctx);
   assert.equal(nudgeCount(r), 0, "eight one-char messages must not trip the nudge");
-  await rm(`${STATE_FILE}.acp.json`, { force: true });
-});
-
-test("images cost nothing for non-vision models", async () => {
-  await rm(`${STATE_FILE}.acp.json`, { force: true });
-  const { api, handlers } = captureApi();
-  createAcpExtension({ modelContextLimit: 10_000 })(api as any);
-  const entries = Array.from({ length: 8 }, (_, i) => imgEntry(`e${i}`));
-  const ctx = ctxWithModel(entries, 10_000, ["text"]);
-  const r = await handlers.get("context")![0]!({ type: "context", messages: entries.map((e) => e.message) }, ctx);
-  // pi-ai silently drops image blocks for non-vision models — counting them
-  // would fabricate 12.8K of phantom usage.
-  assert.equal(nudgeCount(r), 0, "non-vision model must not count image tokens");
   await rm(`${STATE_FILE}.acp.json`, { force: true });
 });
 
