@@ -735,7 +735,7 @@ test("modelContextLimit changes in .pi/acp.json are picked up on the next contex
   const { mkdtempSync, writeFileSync, rmSync, mkdirSync } = await import("node:fs");
   const { tmpdir } = await import("node:os");
   const { join } = await import("node:path");
-  const { formatCompactTokens } = await import("billion-context-kit");
+  const { formatCompactTokens } = await import("acp-kernel/panel");
 
   const tmp = mkdtempSync(join(tmpdir(), "acp-hotreload-"));
   const piDir = join(tmp, ".pi");
