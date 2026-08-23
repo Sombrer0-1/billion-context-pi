@@ -1,4 +1,4 @@
-import type { ExtensionCommandContext, RegisteredCommand } from "@earendil-works/pi-coding-agent";
+import type { ExtensionCommandContext, RegisteredCommand, SessionEntry } from "@earendil-works/pi-coding-agent";
 import type { AcpRuntime } from "./runtime.js";
 import { defaultCountTokens, parseBlockIdArg, collectBlockContent } from "acp-kernel";
 import { getSystemPromptText } from "./compat.js";
@@ -10,6 +10,20 @@ import { ensureSubagentAcpTools } from "./setup-subagent-tools.js";
 declare const CURRENT_VERSION: string;
 
 type CommandOptions = Omit<RegisteredCommand, "name" | "sourceInfo">;
+
+/** Extract per-request prompt-cache usage from assistant messages' provider
+ *  reported usage (footer of each entry). Requests without cache reporting
+ *  stay 0/0 — cacheHitStats excludes them from the average. */
+function cacheUsageSamples(entries: SessionEntry[]): Array<{ input: number; cacheRead: number; cacheWrite: number }> {
+  const out: Array<{ input: number; cacheRead: number; cacheWrite: number }> = [];
+  for (const e of entries) {
+    if (e.type !== "message") continue;
+    const m = e.message as { role?: string; usage?: { input?: number; cacheRead?: number; cacheWrite?: number } };
+    if (m?.role !== "assistant" || !m.usage) continue;
+    out.push({ input: m.usage.input ?? 0, cacheRead: m.usage.cacheRead ?? 0, cacheWrite: m.usage.cacheWrite ?? 0 });
+  }
+  return out;
+}
 
 export function makeCommands(runtime: AcpRuntime): Array<{ name: string; options: CommandOptions }> {
   return [
@@ -99,7 +113,7 @@ export function makeCommands(runtime: AcpRuntime): Array<{ name: string; options
 }
 
 async function statusReport(runtime: AcpRuntime, ctx: ExtensionCommandContext): Promise<string> {
-  const { state, coreMessages } = await runtime.stateFor(ctx);
+  const { state, coreMessages, entries } = await runtime.stateFor(ctx);
   const config = runtime.configFor(ctx);
   // Use pi's real context usage (anchored on provider usage) only for the
   // panel's footer-scale display line; see sentTokens below for arbitration.
@@ -134,6 +148,7 @@ async function statusReport(runtime: AcpRuntime, ctx: ExtensionCommandContext): 
     nudge: turn.nudge,
     modelContextLimit: config.modelContextLimit,
     unprunedTokens: coreMessages.reduce((sum, m) => sum + defaultCountTokens(m.text ?? ""), 0),
+    cacheUsages: cacheUsageSamples(entries ?? []),
   });
 
   // pi-specific footer: delegate usage is tracked outside the main totals.
