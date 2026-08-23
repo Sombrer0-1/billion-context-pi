@@ -190,7 +190,7 @@ test("compress tool THROWS on garbage string content (isError:true → retry nud
   // finding 2 on 7ddd2c6), so the tool must reject.
   await assert.rejects(
     () => compressTool.execute("tc1", { content: "not json {" }, undefined, undefined, ctx),
-    /Invalid content: not valid JSON[\s\S]*ARRAY/,
+    /Invalid compress content[\s\S]*ARRAY/,
   );
   await rm(`${stateFile}.acp.json`, { force: true });
 });

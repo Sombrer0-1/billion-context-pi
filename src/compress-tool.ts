@@ -7,7 +7,7 @@ import type {
 import type { AcpRuntime } from "./runtime.js";
 import { debug, logError, logInfo, logThrow, logWarn } from "./log.js";
 import { estimateTokens, collectCoveredMessageIds, calibrateTokens } from "./tokens.js";
-import { defaultCountTokens, type CompressionBlock } from "acp-kernel";
+import { defaultCountTokens, parseCompressArgs, type CompressionBlock, type CompressParseDiagnostics } from "acp-kernel";
 import { getSystemPromptText } from "./compat.js";
 
 function formatK(n: number): string {
@@ -67,30 +67,34 @@ export function makeCompressTool(runtime: AcpRuntime): ToolDefinition<typeof Com
 
 type RangeEntry = Static<typeof RangeSpec>;
 
-// Normalize the content argument: array passes through; a JSON-encoded string
-// (non-strict-tool providers) is parsed. Returns an error string on bad input —
-// handleCompress THROWS it so pi marks the toolResult isError:true and the
-// retry nudge (src/index.ts) can quote it back (returning it normally would
-// produce isError:false, which both skips the nudge and resets the counter).
-function normalizeRanges(content: CompressArgs["content"]): RangeEntry[] | string {
-  let ranges: unknown = content ?? [];
-  if (typeof ranges === "string") {
-    try {
-      ranges = JSON.parse(ranges);
-    } catch (e) {
-      return `Invalid content: not valid JSON (${e instanceof Error ? e.message : String(e)}). content must be an ARRAY of {startId, endId, summary} objects — pass the array directly, not a string.`;
-    }
+// Normalize the compress args via the kernel's lenient parser (fenced /
+// trailing-comma / raw-newline / double-stringified / truncated-salvage).
+// Returns an error string on bad input — handleCompress THROWS it so pi marks
+// the toolResult isError:true and the retry nudge (src/index.ts) can quote it
+// back (returning it normally would produce isError:false, which both skips
+// the nudge and resets the counter). An empty array passes through (the call
+// site returns "No ranges provided.").
+function normalizeRanges(args: CompressArgs): RangeEntry[] | string {
+  const { ranges, diagnostics } = parseCompressArgs(args);
+  if (ranges.length === 0) {
+    if (Array.isArray(args.content) && args.content.length === 0) return [];
+    return describeDiagnostics(diagnostics, args.content);
   }
-  if (!Array.isArray(ranges)) {
-    return `Invalid content: expected an array of ranges, got ${ranges === null ? "null" : typeof ranges}.`;
+  return ranges.map((r) => ({ startId: r.startRef, endId: r.endRef, summary: r.summary, topic: r.topic }));
+}
+
+function describeDiagnostics(diagnostics: CompressParseDiagnostics, content: CompressArgs["content"]): string {
+  const shape = typeof content === "string"
+    ? "a JSON-encoded string (non-strict-tool providers stringify array arguments)"
+    : content === null ? "null" : `a ${typeof content}`;
+  const base = `Invalid compress content (${diagnostics.kind}): got ${shape}`;
+  if (diagnostics.kind === "truncated") {
+    return `${base}; the input was truncated and no complete ranges could be recovered. Shorten the summary or split into smaller ranges.`;
   }
-  for (const [i, r] of ranges.entries()) {
-    const o = r as Record<string, unknown>;
-    if (!o || typeof o !== "object" || typeof o.startId !== "string" || typeof o.endId !== "string" || typeof o.summary !== "string") {
-      return `Invalid content[${i}]: each range must be an object with string fields startId, endId, summary.`;
-    }
+  if (diagnostics.invalidItems > 0) {
+    return `${base}; ${diagnostics.invalidItems} entr${diagnostics.invalidItems === 1 ? "y was" : "ies were"} dropped as invalid. Each range must be an object with string fields startId, endId, summary.`;
   }
-  return ranges as RangeEntry[];
+  return `${base}. content must be an ARRAY of {startId, endId, summary} objects.`;
 }
 
 /** Panel block count ("… (~N reclaimed, B blocks)"), or -1 for non-panels. */
@@ -135,7 +139,7 @@ function tier3OnlyRewrite(newBlocks: CompressionBlock[], allBlocks: CompressionB
 }
 
 async function handleCompress(args: CompressArgs, runtime: AcpRuntime, ctx: ExtensionContext, toolCallId?: string): Promise<string> {
-  const maybeRanges = normalizeRanges(args.content);
+  const maybeRanges = normalizeRanges(args);
   // Argument errors throw (not return): pi-agent-core only sets isError:true
   // on THROWN tool errors, and the retry nudge keys off isError. A returned
   // string would land as isError:false — no nudge, and the counter resets.
