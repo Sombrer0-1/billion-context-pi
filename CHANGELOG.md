@@ -1,6 +1,7 @@
 # Changelog
 
 ## Unreleased (master, since v0.1.38)
+- **fix(guardrail): `toolOutputMaxBytes` 未配置时文档默认值 200000 现在实际生效** — 原接线 `if (max !== undefined && max > 0)` 把「未配置」当成「禁用」，内置 200KB 天花板永远不可达（`capToolOutput` 内部的回退到不了）；pi 只内置 cap bash/read/grep，其余工具可无限注入 context，与 CONFIGURATION.md 承诺的 ACTIVE 默认不符。改为接线层 `?? DEFAULT_TOOL_OUTPUT_MAX_BYTES` 回退，`0`/负数禁用语义不变 (#210)
 
 - **fix(compress): 接受 JSON 字符串形式的 `content` 参数** — 非严格工具 provider（vLLM openai-completions，`supportsStrictTools:false`）会把嵌套数组参数字符串化，pi 的 typebox 校验直接拒掉（`content.0: must be object`）。实测会话 01a00a38 全部唯一一次 compress 调用即死于此，3 小时会话零压缩。schema 改为 `Type.Union([Array, String])`，字符串自动 `JSON.parse` 并校验（错误信息引导模型传数组）
 - **feat(nudge): compress 失败即时重试提示** — 失败的 compress toolResult 不再白白吃掉本轮 nudge 预算：下一次 context 事件立即注入重试提示（引用被截短的错误文本、给出正确调用格式）。仅统计**当前用户轮**的失败（旧轮失败不再复发），封顶按**失败调用次数**计：每轮最多 3 次（`MAX_COMPRESS_ATTEMPTS`），成功重置；中性结果（非错误非面板文本，如 "No ranges provided."）不重置也不递增——混合失败模式无法绕过封顶。参数类错误改为 throw（pi 仅对 throw 的工具错误标 `isError:true`，return 字符串会被当成成功并重置计数）。提示在重试前每次 LLM 调用都重新注入（pi 每次重建上下文，一次性 append 会消失）
