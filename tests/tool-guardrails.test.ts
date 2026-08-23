@@ -6,8 +6,10 @@ import {
   detectBashTimeout,
   appendTimeoutNotice,
   isBashToolResult,
+  wireToolGuardrails,
 } from "../src/tool-guardrails.js";
-import type { ToolResultEvent } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ToolResultEvent } from "@earendil-works/pi-coding-agent";
+import type { AcpRuntime } from "../src/runtime.js";
 
 type Content = ToolResultEvent["content"];
 const text = (t: string): Content => [{ type: "text", text: t }];
@@ -132,4 +134,51 @@ test("isBashToolResult narrows by toolName and exposes bash details (vendored gu
   if (isBashToolResult(bash)) {
     assert.equal(bash.details?.fullOutputPath, "/tmp/x");
   }
+});
+
+// --- wiring: the default-application contract (issue #210) ---
+
+function wireFor(adapter: Record<string, unknown>) {
+  const handlers: Record<string, (e: ToolResultEvent) => unknown> = {};
+  const pi = {
+    on: (name: string, fn: (e: never) => unknown) => {
+      handlers[name] = fn as (e: ToolResultEvent) => unknown;
+    },
+  } as unknown as ExtensionAPI;
+  const runtime = { adapter } as AcpRuntime;
+  wireToolGuardrails(pi, runtime);
+  return (event: ToolResultEvent) => handlers["tool_result"]!(event);
+}
+
+const readResult = (t: string) =>
+  ({ toolName: "read", content: text(t), isError: false }) as unknown as ToolResultEvent;
+
+function textOf(part: unknown): string {
+  if (part && typeof part === "object" && "text" in part && typeof part.text === "string") {
+    return part.text;
+  }
+  throw new Error("expected a text content part");
+}
+
+test("wireToolGuardrails applies the documented 200KB default when toolOutputMaxBytes is unset", () => {
+  const onResult = wireFor({});
+  const ret = onResult(readResult("x".repeat(300 * 1024)));
+  assert.ok(ret && typeof ret === "object" && "content" in ret && Array.isArray(ret.content),
+    "oversized output must be capped even with no explicit config");
+  const t = textOf(ret.content[0]);
+  assert.match(t, /\[ACP guardrail/);
+  assert.ok(Buffer.byteLength(t, "utf8") < 250 * 1024, "payload must be truncated near the 200KB default");
+});
+
+test("wireToolGuardrails keeps an explicit toolOutputMaxBytes: 0 as disable", () => {
+  const onResult = wireFor({ toolOutputMaxBytes: 0 });
+  assert.equal(onResult(readResult("x".repeat(300 * 1024))), undefined);
+});
+
+test("wireToolGuardrails honors an explicit smaller cap", () => {
+  const onResult = wireFor({ toolOutputMaxBytes: 1000 });
+  const ret = onResult(readResult("x".repeat(10_000)));
+  assert.ok(ret && typeof ret === "object" && "content" in ret && Array.isArray(ret.content));
+  const t = textOf(ret.content[0]);
+  assert.ok(Buffer.byteLength(t, "utf8") < 2000, "payload must be truncated to the explicit cap");
 });
