@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { buildChildArgs, delegateSpawnOptions, injectedWaitMessage, buildWaitResult, buildCancelResult, getDelegateUsage, resetDelegateUsage, injectResult, resolveWaitTimeoutMs, findUndeliveredRuns, undeliveredNoticeFrom, makeDelegateTool } from "../src/delegate-tool.js";
+import { buildChildArgs, delegateSpawnOptions, injectedWaitMessage, buildWaitResult, buildCancelResult, getDelegateUsage, resetDelegateUsage, injectResult, resolveWaitTimeoutMs, findUndeliveredRuns, undeliveredNoticeFrom, buildRecoveryNotice, makeDelegateTool } from "../src/delegate-tool.js";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 
 /** Minimal ctx mock - buildChildArgs reads ctx.model and sessionManager. */
@@ -431,6 +431,17 @@ test("undeliveredNoticeFrom formats a recovery notice and marks covered runs del
   assert.ok(!text.includes("del_c"), "running runs excluded");
   assert.equal(undelivered.injected, true, "covered run marked delivered");
   assert.equal(undeliveredNoticeFrom([]), "", "empty registry yields no notice");
+});
+
+test("buildRecoveryNotice computes without committing the delivered marking", () => {
+  const undelivered = mkRun("del_a", "failed");
+  const { text, covered } = buildRecoveryNotice([undelivered], undefined);
+  assert.ok(text.includes("Recovery notice"), "recovery text built");
+  assert.deepEqual(covered.map((r: any) => r.runId), ["del_a"], "covered run reported");
+  assert.equal(undelivered.injected, undefined, "not marked before the carrier send commits");
+  const empty = buildRecoveryNotice([mkRun("del_b", "completed", { injected: true })], undefined);
+  assert.equal(empty.text, "", "no undelivered runs yields empty carrier");
+  assert.equal(empty.covered.length, 0);
 });
 
 test("async delegate with missing cwd injects FAILED instead of crashing the host", async () => {

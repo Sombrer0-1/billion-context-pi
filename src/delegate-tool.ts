@@ -480,16 +480,27 @@ export function findUndeliveredRuns(all: DelegateRun[], excludeRunId?: string): 
   );
 }
 
-/** Build a recovery notice for undelivered runs. Marks each covered run
- *  injected=true (this notice IS its delivery) so it is never re-notified and
- *  a later wait dedups instead of re-delivering the payload. */
-export function undeliveredNoticeFrom(all: DelegateRun[], excludeRunId?: string): string {
+/** Compute the recovery notice for undelivered runs WITHOUT marking them
+ *  delivered. The caller commits the marking (covered[].injected = true) only
+ *  after the carrier message is actually sent: if the send throws, the runs
+ *  must stay undelivered so a later carrier can recover them. */
+export function buildRecoveryNotice(all: DelegateRun[], excludeRunId?: string): { text: string; covered: DelegateRun[] } {
   const pending = findUndeliveredRuns(all, excludeRunId);
-  if (pending.length === 0) return "";
-  for (const r of pending) r.injected = true;
+  if (pending.length === 0) return { text: "", covered: [] };
   const anyFailed = pending.some((r) => r.status === "failed");
   const header = `⚠️ Recovery notice: ${pending.length} earlier delegate result${pending.length === 1 ? "" : "s"} never reached you (notification delivery failed).${anyFailed ? " At least one FAILED — that task's work is missing; read its result below and decide whether to re-dispatch before concluding." : ""}`;
-  return [header, ...pending.map((r) => formatRunResult(r))].join("\n");
+  return { text: [header, ...pending.map((r) => formatRunResult(r))].join("\n"), covered: pending };
+}
+
+/** Build a recovery notice for undelivered runs and mark each covered run
+ *  injected=true (this notice IS its delivery) so it is never re-notified and
+ *  a later wait dedups instead of re-delivering the payload. For carriers the
+ *  host owns (delegate tool results); injectResult commits the marking itself
+ *  only after its send succeeds (see buildRecoveryNotice). */
+export function undeliveredNoticeFrom(all: DelegateRun[], excludeRunId?: string): string {
+  const { text, covered } = buildRecoveryNotice(all, excludeRunId);
+  for (const r of covered) r.injected = true;
+  return text;
 }
 
 function undeliveredNotice(excludeRunId?: string): string {
@@ -519,7 +530,7 @@ export function injectedWaitMessage(
   if (!run.injected) return null;
   const file = run.result?.file;
   const fileLine = file ? ` If you need details, read the result file: \`${file}\`.` : "";
-  return `Delegate \`${runId}\` already delivered its result via a system notification when it finished — no need to wait on it again.${remainingLine}${fileLine}`;
+  return `Delegate \`${runId}\` already delivered its result (system notification or recovery notice) when it finished — no need to wait on it again.${remainingLine}${fileLine}`;
 }
 
 /** Build usage-aware return payload. Sets usageReported=true so subsequent
@@ -570,7 +581,7 @@ export function buildCancelResult(
 
 export function makeDelegateWaitTool(_pi: ExtensionAPI): ToolDefinition<typeof WaitParams> {
   const exec = async (args: { runId: string; timeout?: number }, signal?: AbortSignal): Promise<AgentToolResult<unknown>> => {
-  const run = runs.get(args.runId);
+    const run = runs.get(args.runId);
     if (!run) {
       return { details: undefined, content: [{ type: "text" as const, text: `No delegate run with runId \`${args.runId}\`. It may have already been reported or never existed.` }] };
     }
@@ -641,8 +652,8 @@ export function makeDelegateWaitTool(_pi: ExtensionAPI): ToolDefinition<typeof W
       );
     });
   };
-return {
-  name: "acp_delegate_wait",
+  return {
+    name: "acp_delegate_wait",
     label: "ACP Delegate Wait",
     description:
       "Block until an acp_delegate async run finishes, then return its result (status + file path). This is the ONLY way to fetch a delegate's result — there is no non-blocking status tool, so you cannot poll. Default timeout is 10s (max 300s). If the delegate finishes within the timeout, its result is returned here (same format as a sync delegate). If it times out, the run keeps going in the background and you should STOP waiting — do not retry in a loop; go do other work, and a completion notification will still be injected into the chat when it finishes.",
@@ -1131,13 +1142,16 @@ export function injectResult(
     ? "This delegate did NOT complete its task — its result is missing from your work. Read the error excerpt (and the result file if present), then decide whether to re-dispatch the task before wrapping up. This is an automated system notification, NOT a user message."
     : "This is an automated system notification, NOT a user message. Read the result file if you need the details, then continue your original task; do not treat this as a new user request.";
   const header = `[acp_delegate ${status}] **${agent}** (runId \`${runId}\`, exit ${code ?? "?"})${timeoutNote}${remainingLine}${usageNote} ${closing}`;
-  const recovery = undeliveredNotice(runId);
-  const text = formatPayload(header, file, task, failed ? body : undefined) + (recovery ? `\n\n${recovery}` : "");
+  const { text: recoveryText, covered } = buildRecoveryNotice(Array.from(runs.values()), runId);
+  const text = formatPayload(header, file, task, failed ? body : undefined) + (recoveryText ? `\n\n${recoveryText}` : "");
   try {
     // sendUserMessage is fire-and-forget (returns void): it enqueues a
     // follow-up turn. Interactive/rpc sessions consume it via their main loop;
     // injection at shutdown is best-effort (no API to await a turn).
     send.call(pi, text, { deliverAs: "followUp" });
+    // Commit the recovery marking only now: a thrown send above must leave the
+    // covered runs undelivered so a later carrier can still recover them.
+    for (const r of covered) r.injected = true;
     return true;
   } catch (err) {
     debug.event("delegate-inject-error", { runId, error: String(err) });
