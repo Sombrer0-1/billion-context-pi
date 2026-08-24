@@ -435,12 +435,15 @@ The delegate runs in its own clean pi process — it does NOT see this conversat
       "Delegate to get a focused result in a clean context, or to parallelize independent work.",
       "The sub-agent has NO access to this conversation — write a fully self-contained task.",
       "Prefer async=true and launch several; results arrive back automatically when each finishes.",
+      "A FAILED notification (⚠️) means that task produced no usable result — decide whether to re-dispatch it before wrapping up.",
       "For changes you must apply yourself, delegate read-only investigation (reviewer/researcher/oracle) and keep the main context as the sole writer.",
     ],
     parameters: DelegateParams,
     async execute(toolCallId, params, signal, _onUpdate, ctx): Promise<AgentToolResult<unknown>> {
       const args = params as DelegateArgs;
-      const outcome = await runDelegate(pi, args, ctx, signal);
+      let outcome = await runDelegate(pi, args, ctx, signal);
+      const notice = undeliveredNotice();
+      if (notice) outcome = `${notice}\n\n${outcome}`;
       return { details: undefined, content: [{ type: "text", text: outcome }] };
     },
   };
@@ -459,6 +462,47 @@ function formatRunResult(run: DelegateRun): string {
 function remainingLineForWait(selfRunId: string): string {
   const remaining = Array.from(runs.values()).filter((r) => r.status === "running" && r.runId !== selfRunId).length;
   return remaining > 0 ? ` ${remaining} delegate${remaining === 1 ? " is" : "s are"} still running.` : "";
+}
+
+/** Runs that reached a terminal state but whose result never reached the
+ *  model: no parked waiter, not consumed by a tool result, and never injected
+ *  as a notification. The model was promised a notification ("do NOT keep
+ *  waiting"), so these must eventually be recovered, or a failed delegate
+ *  stays invisible until the very end of the task. */
+export function findUndeliveredRuns(all: DelegateRun[], excludeRunId?: string): DelegateRun[] {
+  return all.filter(
+    (r) =>
+      r.runId !== excludeRunId &&
+      (r.status === "completed" || r.status === "failed") &&
+      !r.waiter &&
+      !r.consumed &&
+      !r.injected,
+  );
+}
+
+/** Build a recovery notice for undelivered runs. Marks each covered run
+ *  injected=true (this notice IS its delivery) so it is never re-notified and
+ *  a later wait dedups instead of re-delivering the payload. */
+export function undeliveredNoticeFrom(all: DelegateRun[], excludeRunId?: string): string {
+  const pending = findUndeliveredRuns(all, excludeRunId);
+  if (pending.length === 0) return "";
+  for (const r of pending) r.injected = true;
+  const anyFailed = pending.some((r) => r.status === "failed");
+  const header = `⚠️ Recovery notice: ${pending.length} earlier delegate result${pending.length === 1 ? "" : "s"} never reached you (notification delivery failed).${anyFailed ? " At least one FAILED — that task's work is missing; read its result below and decide whether to re-dispatch before concluding." : ""}`;
+  return [header, ...pending.map((r) => formatRunResult(r))].join("\n");
+}
+
+function undeliveredNotice(excludeRunId?: string): string {
+  return undeliveredNoticeFrom(Array.from(runs.values()), excludeRunId);
+}
+
+/** Attach the recovery notice (if any) to a delegate tool result, so a lost
+ *  notification resurfaces at the next delegate interaction. */
+function withUndeliveredNotice(result: AgentToolResult<unknown>): AgentToolResult<unknown> {
+  const notice = undeliveredNotice();
+  const first = result.content[0];
+  if (notice && first && first.type === "text") first.text = `${notice}\n\n${first.text}`;
+  return result;
 }
 
 /** If the delegate already delivered its result via a system notification
@@ -525,8 +569,80 @@ export function buildCancelResult(
 }
 
 export function makeDelegateWaitTool(_pi: ExtensionAPI): ToolDefinition<typeof WaitParams> {
-  return {
-    name: "acp_delegate_wait",
+  const exec = async (args: { runId: string; timeout?: number }, signal?: AbortSignal): Promise<AgentToolResult<unknown>> => {
+  const run = runs.get(args.runId);
+    if (!run) {
+      return { details: undefined, content: [{ type: "text" as const, text: `No delegate run with runId \`${args.runId}\`. It may have already been reported or never existed.` }] };
+    }
+    // Already finished (e.g. the model calls wait after the injected
+    // notification, or the run was cancelled).
+    const displayMode = delegateDisplayUsage;
+    if (run.status === "cancelled") {
+      run.consumed = true;
+      return buildWaitResult(run, `Delegate \`${args.runId}\` was cancelled (no result).${remainingLineForWait(args.runId)}`, displayMode);
+    }
+    if (run.status !== "running") {
+      // The delegate already finished. If the close handler already injected
+      // its result as a system notification (it fired before this wait was
+      // called), don't re-deliver the full payload — point at the file
+      // instead, so the model never sees the same result twice.
+      const dedup = injectedWaitMessage(run, args.runId, remainingLineForWait(args.runId));
+      if (dedup) {
+        run.consumed = true;
+        return buildWaitResult(run, dedup, displayMode);
+      }
+      // status is only flipped together with result (see close handler), so
+      // a non-running, non-cancelled run always has a result. Guard anyway.
+      run.consumed = true;
+      if (!run.result) {
+        return buildWaitResult(run, `Delegate \`${args.runId}\` finished but no result is available (persist error).`, displayMode);
+      }
+      return buildWaitResult(run, formatRunResult(run), displayMode);
+    }
+    const timeoutMs = resolveWaitTimeoutMs(args.timeout);
+    // Refuse to park a second waiter on the same run: a second wait would
+    // overwrite run.waiter and orphan the first wait's listener/timer.
+    if (run.waiter) {
+      return { details: undefined, content: [{ type: "text", text: `Delegate \`${args.runId}\` already has a wait in progress; do not wait on it twice.` }] };
+    }
+    // Park a waiter; the close handler resolves it (and the result is owned
+    // by this tool, so no injection duplicates it).
+    return new Promise((resolve) => {
+      let settled = false;
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const finish = (result: { details: undefined; content: { type: "text"; text: string }[]; usage?: AgentToolResult<unknown>["usage"] }) => {
+        if (settled) return;
+        settled = true;
+        run.waiter = undefined;
+        if (timer) clearTimeout(timer);
+        signal?.removeEventListener("abort", onAbort);
+        resolve(result);
+      };
+      const onAbort = () => {
+        finish({ details: undefined, content: [{ type: "text", text: `Aborted; delegate \`${args.runId}\` is still running in the background. A notification will be injected when it finishes.` }] });
+      };
+      run.waiter = () => {
+        run.consumed = true; // we own the result; suppress injection
+        if (run.status === "cancelled") {
+          // Same message as the cancel-then-wait early-return path, for consistency.
+          // Don't go through formatRunResult — cancelled runs have no result, and
+          // formatPayload would render a misleading "could not be persisted" line.
+          // Partial usage (if any) is accumulated per displayMode like the
+          // early-return path.
+          finish(buildWaitResult(run, `Delegate \`${run.runId}\` was cancelled (no result).${remainingLineForWait(run.runId)}`, displayMode));
+          return;
+        }
+        finish(buildWaitResult(run, formatRunResult(run), displayMode));
+      };
+      signal?.addEventListener("abort", onAbort);
+      timer = setTimeout(
+        () => finish({ details: undefined, content: [{ type: "text", text: `Failed: delegate \`${args.runId}\` result not ready after ${Math.round(timeoutMs / 1000)}s. Do NOT keep waiting or retry — go do other work now. The run continues in the background and a completion notification (with the result file path) will be injected into the chat when it finishes.` }] }),
+        timeoutMs,
+      );
+    });
+  };
+return {
+  name: "acp_delegate_wait",
     label: "ACP Delegate Wait",
     description:
       "Block until an acp_delegate async run finishes, then return its result (status + file path). This is the ONLY way to fetch a delegate's result — there is no non-blocking status tool, so you cannot poll. Default timeout is 10s (max 300s). If the delegate finishes within the timeout, its result is returned here (same format as a sync delegate). If it times out, the run keeps going in the background and you should STOP waiting — do not retry in a loop; go do other work, and a completion notification will still be injected into the chat when it finishes.",
@@ -537,82 +653,33 @@ export function makeDelegateWaitTool(_pi: ExtensionAPI): ToolDefinition<typeof W
     ],
     parameters: WaitParams,
     async execute(_toolCallId, params, signal): Promise<AgentToolResult<unknown>> {
-      const args = params as { runId: string; timeout?: number };
-      const run = runs.get(args.runId);
-      if (!run) {
-        return { details: undefined, content: [{ type: "text" as const, text: `No delegate run with runId \`${args.runId}\`. It may have already been reported or never existed.` }] };
-      }
-      // Already finished (e.g. the model calls wait after the injected
-      // notification, or the run was cancelled).
-      const displayMode = delegateDisplayUsage;
-      if (run.status === "cancelled") {
-        run.consumed = true;
-        return buildWaitResult(run, `Delegate \`${args.runId}\` was cancelled (no result).${remainingLineForWait(args.runId)}`, displayMode);
-      }
-      if (run.status !== "running") {
-        // The delegate already finished. If the close handler already injected
-        // its result as a system notification (it fired before this wait was
-        // called), don't re-deliver the full payload — point at the file
-        // instead, so the model never sees the same result twice.
-        const dedup = injectedWaitMessage(run, args.runId, remainingLineForWait(args.runId));
-        if (dedup) {
-          run.consumed = true;
-          return buildWaitResult(run, dedup, displayMode);
-        }
-        // status is only flipped together with result (see close handler), so
-        // a non-running, non-cancelled run always has a result. Guard anyway.
-        run.consumed = true;
-        if (!run.result) {
-          return buildWaitResult(run, `Delegate \`${args.runId}\` finished but no result is available (persist error).`, displayMode);
-        }
-        return buildWaitResult(run, formatRunResult(run), displayMode);
-      }
-      const timeoutMs = resolveWaitTimeoutMs(args.timeout);
-      // Refuse to park a second waiter on the same run: a second wait would
-      // overwrite run.waiter and orphan the first wait's listener/timer.
-      if (run.waiter) {
-        return { details: undefined, content: [{ type: "text", text: `Delegate \`${args.runId}\` already has a wait in progress; do not wait on it twice.` }] };
-      }
-      // Park a waiter; the close handler resolves it (and the result is owned
-      // by this tool, so no injection duplicates it).
-      return new Promise((resolve) => {
-        let settled = false;
-        let timer: ReturnType<typeof setTimeout> | undefined;
-        const finish = (result: { details: undefined; content: { type: "text"; text: string }[]; usage?: AgentToolResult<unknown>["usage"] }) => {
-          if (settled) return;
-          settled = true;
-          run.waiter = undefined;
-          if (timer) clearTimeout(timer);
-          signal?.removeEventListener("abort", onAbort);
-          resolve(result);
-        };
-        const onAbort = () => {
-          finish({ details: undefined, content: [{ type: "text", text: `Aborted; delegate \`${args.runId}\` is still running in the background. A notification will be injected when it finishes.` }] });
-        };
-        run.waiter = () => {
-          run.consumed = true; // we own the result; suppress injection
-          if (run.status === "cancelled") {
-            // Same message as the cancel-then-wait early-return path, for consistency.
-            // Don't go through formatRunResult — cancelled runs have no result, and
-            // formatPayload would render a misleading "could not be persisted" line.
-            // Partial usage (if any) is accumulated per displayMode like the
-            // early-return path.
-            finish(buildWaitResult(run, `Delegate \`${run.runId}\` was cancelled (no result).${remainingLineForWait(run.runId)}`, displayMode));
-            return;
-          }
-          finish(buildWaitResult(run, formatRunResult(run), displayMode));
-        };
-        signal?.addEventListener("abort", onAbort);
-        timer = setTimeout(
-          () => finish({ details: undefined, content: [{ type: "text", text: `Failed: delegate \`${args.runId}\` result not ready after ${Math.round(timeoutMs / 1000)}s. Do NOT keep waiting or retry — go do other work now. The run continues in the background and a completion notification (with the result file path) will be injected into the chat when it finishes.` }] }),
-          timeoutMs,
-        );
-      });
+      return withUndeliveredNotice(await exec(params as { runId: string; timeout?: number }, signal));
     },
   };
 }
 
 export function makeDelegateCancelTool(_pi: ExtensionAPI): ToolDefinition<typeof CancelParams> {
+  const exec = async (params: Static<typeof CancelParams>): Promise<AgentToolResult<unknown>> => {
+    const { runId } = params;
+    const run = runs.get(runId);
+    if (!run) {
+      return { details: undefined, content: [{ type: "text", text: `Unknown runId "${runId}".` }] };
+    }
+    if (run.status !== "running") {
+      return buildCancelResult(run, `Run ${runId} already ${run.status} (no action).`);
+    }
+    run.status = "cancelled";
+    run.consumed = true; // suppress injection; the waiter (if any) gets cancelled status
+    try {
+      run.child?.kill("SIGTERM");
+    } catch (err) {
+      debug.event("delegate-cancel-kill-error", { runId, error: String(err) });
+      logError("delegate", { event: "cancel-kill-error", runId, error: String(err) });
+    }
+    delegateStatusWidget.poke();
+    const displayMode = delegateDisplayUsage;
+    return buildCancelResult(run, `Cancelled ${runId} (${run.agent}).`, displayMode);
+  };
   return {
     name: "acp_delegate_cancel",
     label: "ACP Delegate Cancel",
@@ -622,25 +689,7 @@ export function makeDelegateCancelTool(_pi: ExtensionAPI): ToolDefinition<typeof
     promptGuidelines: [],
     parameters: CancelParams,
     async execute(toolCallId, params): Promise<AgentToolResult<unknown>> {
-      const { runId } = params as Static<typeof CancelParams>;
-      const run = runs.get(runId);
-      if (!run) {
-        return { details: undefined, content: [{ type: "text", text: `Unknown runId "${runId}".` }] };
-      }
-      if (run.status !== "running") {
-        return buildCancelResult(run, `Run ${runId} already ${run.status} (no action).`);
-      }
-      run.status = "cancelled";
-      run.consumed = true; // suppress injection; the waiter (if any) gets cancelled status
-      try {
-        run.child?.kill("SIGTERM");
-      } catch (err) {
-        debug.event("delegate-cancel-kill-error", { runId, error: String(err) });
-        logError("delegate", { event: "cancel-kill-error", runId, error: String(err) });
-      }
-      delegateStatusWidget.poke();
-      const displayMode = delegateDisplayUsage;
-      return buildCancelResult(run, `Cancelled ${runId} (${run.agent}).`, displayMode);
+      return withUndeliveredNotice(await exec(params as Static<typeof CancelParams>));
     },
   };
 }
@@ -833,7 +882,7 @@ async function runDelegate(
             return;
           }
           const mode = delegateDisplayUsage;
-          const injected = injectResult(pi, args.agent, runId, args.task, code, file, run.timedOut, run.usage, mode, run.usageReported);
+          const injected = injectResult(pi, args.agent, runId, args.task, code, file, run.timedOut, run.usage, mode, run.usageReported, run.status === "failed" ? body : undefined);
           if (run.usage && !run.usageReported && (mode === "separate" || injected)) {
             run.usageReported = true;
           }
@@ -846,7 +895,7 @@ async function runDelegate(
           run.finishedAt = Date.now();
           debug.event("delegate-done-error", { runId, error: String(err) });
           logError("delegate", { event: "done-error", runId, agent: args.agent, error: String(err) });
-          run.waiter?.();
+          notifyTerminalFailure(pi, run, `result persistence error: ${String(err)}`);
           delegateStatusWidget.poke();
         }
       })();
@@ -873,7 +922,8 @@ async function runDelegate(
         run.result = { code: null, file: "", body: `spawn error: ${String(err)}` };
         debug.event("delegate-spawn-error", { runId, error: String(err) });
         logError("delegate", { event: "spawn-error", runId, agent: args.agent, error: String(err) });
-        run.waiter?.();
+        if (run.status === "failed") notifyTerminalFailure(pi, run, `spawn error: ${String(err)}`);
+        else run.waiter?.();
         delegateStatusWidget.poke();
       }
     });
@@ -1020,6 +1070,7 @@ export function injectResult(
   usage?: Usage,
   mode: "merged" | "separate" = "separate",
   usageAlreadyReported?: boolean,
+  body?: string,
 ): boolean {
   const send = pi.sendUserMessage;
   if (typeof send !== "function") {
@@ -1027,7 +1078,8 @@ export function injectResult(
     logWarn("delegate", { event: "inject-skipped", runId, reason: "sendUserMessage unavailable" });
     return false;
   }
-  const status = code === 0 ? "completed" : "failed";
+  const failed = code !== 0;
+  const status = failed ? "FAILED ⚠️" : "completed";
   // Tell the model how many other delegates are still running, so it doesn't
   // lose count when many were dispatched in a batch (e.g. launched 5, this is
   // the 2nd to return → "3 still running" → the model knows to keep waiting).
@@ -1071,8 +1123,12 @@ export function injectResult(
     if (lines.length) usageNote = ` Usage: ${lines.join(", ")}.`;
   }
   
-  const header = `[acp_delegate ${status}] **${agent}** (runId \`${runId}\`, exit ${code ?? "?"})${timeoutNote}${remainingLine}${usageNote} This is an automated system notification, NOT a user message. Read the result file if you need the details, then continue your original task; do not treat this as a new user request.`;
-  const text = formatPayload(header, file, task);
+  const closing = failed
+    ? "This delegate did NOT complete its task — its result is missing from your work. Read the error excerpt (and the result file if present), then decide whether to re-dispatch the task before wrapping up. This is an automated system notification, NOT a user message."
+    : "This is an automated system notification, NOT a user message. Read the result file if you need the details, then continue your original task; do not treat this as a new user request.";
+  const header = `[acp_delegate ${status}] **${agent}** (runId \`${runId}\`, exit ${code ?? "?"})${timeoutNote}${remainingLine}${usageNote} ${closing}`;
+  const recovery = undeliveredNotice(runId);
+  const text = formatPayload(header, file, task, failed ? body : undefined) + (recovery ? `\n\n${recovery}` : "");
   try {
     // sendUserMessage is fire-and-forget (returns void): it enqueues a
     // follow-up turn. Interactive/rpc sessions consume it via their main loop;
@@ -1084,6 +1140,34 @@ export function injectResult(
     logError("delegate", { event: "inject-error", runId, agent, error: String(err) });
     return false;
   }
+}
+
+/** Deliver a terminal failure that occurred OUTSIDE normal finalize (spawn
+ *  error, result persistence error). A parked waiter owns the result; with no
+ *  waiter the model must still learn the run failed — inject best-effort, and
+ *  runs whose injection also fails land in the undelivered set for recovery. */
+function notifyTerminalFailure(pi: ExtensionAPI, run: DelegateRun, body: string): void {
+  const hadWaiter = run.waiter !== undefined;
+  run.waiter?.();
+  if (hadWaiter || run.consumed) return;
+  const mode = delegateDisplayUsage;
+  const injected = injectResult(
+    pi,
+    run.agent,
+    run.runId,
+    run.task,
+    run.result?.code ?? null,
+    run.result?.file ?? "",
+    run.timedOut,
+    run.usage,
+    mode,
+    run.usageReported,
+    body,
+  );
+  if (run.usage && !run.usageReported && (mode === "separate" || injected)) {
+    run.usageReported = true;
+  }
+  run.injected = injected;
 }
 
 // Build the lightweight payload: a header, the task title (so the model
