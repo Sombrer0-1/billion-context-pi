@@ -454,7 +454,7 @@ function formatRunResult(run: DelegateRun): string {
   const header =
     run.status === "completed"
       ? `Delegate **${run.agent}** (runId \`${run.runId}\`) completed (exit ${run.exitCode ?? "?"})${timeoutNote}${remainingLineForWait(run.runId)}`
-      : `Delegate **${run.agent}** (runId \`${run.runId}\`) ${run.status} (exit ${run.exitCode ?? "?"})${timeoutNote}${remainingLineForWait(run.runId)}`;
+      : `Delegate **${run.agent}** (runId \`${run.runId}\`) ${run.status === "failed" ? "FAILED ⚠️" : run.status} (exit ${run.exitCode ?? "?"})${timeoutNote}${remainingLineForWait(run.runId)}`;
   return formatPayload(header, run.result?.file ?? "", run.task, run.result?.body);
 }
 
@@ -1050,7 +1050,7 @@ function waitForChild(child: ChildProcess, signal: AbortSignal | undefined): Pro
 }
 
 function formatSyncResult(agent: string, runId: string, task: string, r: ChildResult, file: string): string {
-  const status = r.timedOut ? "timed out" : r.code === 0 ? "completed" : "failed";
+  const status = r.timedOut ? "timed out" : r.code === 0 ? "completed" : "FAILED ⚠️";
   const header = `Delegate **${agent}** ${status} (runId \`${runId}\`, exit ${r.code ?? "?"}).`;
   if (r.code === 0 && !r.timedOut) {
     return formatPayload(header, file, task);
