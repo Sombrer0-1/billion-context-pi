@@ -40,6 +40,10 @@ declare const CURRENT_VERSION: string;
 
 export function createAcpExtension(adapter: AdapterConfig = {}): ExtensionFactory {
   return (pi: ExtensionAPI) => {
+    if (process.env.BILLION_CONTEXT_PROXY) {
+      console.log("[bcp] disabled: BILLION_CONTEXT_PROXY detected — proxy handles compression");
+      return;
+    }
     const runtime = createRuntime(adapter);
     wireCompactionDisable(pi);
     wireSessionLifecycle(pi, runtime);
