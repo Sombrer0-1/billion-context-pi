@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { buildChildArgs, delegateSpawnOptions, injectedWaitMessage, buildWaitResult, buildCancelResult, getDelegateUsage, resetDelegateUsage, injectResult, resolveWaitTimeoutMs, findUndeliveredRuns, undeliveredNoticeFrom } from "../src/delegate-tool.js";
+import { buildChildArgs, delegateSpawnOptions, injectedWaitMessage, buildWaitResult, buildCancelResult, getDelegateUsage, resetDelegateUsage, injectResult, resolveWaitTimeoutMs, findUndeliveredRuns, undeliveredNoticeFrom, makeDelegateTool } from "../src/delegate-tool.js";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 
 /** Minimal ctx mock - buildChildArgs reads ctx.model and sessionManager. */
@@ -431,4 +431,27 @@ test("undeliveredNoticeFrom formats a recovery notice and marks covered runs del
   assert.ok(!text.includes("del_c"), "running runs excluded");
   assert.equal(undelivered.injected, true, "covered run marked delivered");
   assert.equal(undeliveredNoticeFrom([]), "", "empty registry yields no notice");
+});
+
+test("async delegate with missing cwd injects FAILED instead of crashing the host", async () => {
+  const sent: string[] = [];
+  const pi = { sendUserMessage: (t: string) => sent.push(t) } as unknown as Parameters<typeof makeDelegateTool>[0];
+  const tool = makeDelegateTool(pi);
+  const ctx = { ...mockCtx("pi"), mode: "tui", cwd: process.cwd() } as unknown as ExtensionContext;
+  const res = await tool.execute(
+    "tc-spawn-enoent",
+    { agent: "oracle", task: "e2e", cwd: "/nonexistent-e2e-cwd", async: true },
+    undefined,
+    undefined,
+    ctx,
+  );
+  const launch = (res.content[0] as { text?: string }).text ?? "";
+  const runId = /`(del_[a-z0-9_]+)`/.exec(launch)?.[1];
+  assert.ok(runId, `runId in launch message: ${launch}`);
+  const deadline = Date.now() + 5000;
+  while (!sent.length && Date.now() < deadline) await new Promise((r) => setTimeout(r, 50));
+  assert.equal(sent.length, 1, `one injected message, got ${JSON.stringify(sent)}`);
+  assert.match(sent[0]!, /FAILED/);
+  assert.ok(sent[0]!.includes(runId!), "injection names the failed runId");
+  assert.match(sent[0]!, /spawn error/);
 });

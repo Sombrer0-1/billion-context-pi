@@ -731,6 +731,11 @@ async function runDelegate(
   debug.event("delegate-spawn", { agent: args.agent, runId, cwd, async: isAsync, useJsonStream, cliArgs });
   logInfo("delegate", { event: "spawn", agent: args.agent, runId, cwd, async: isAsync, useJsonStream, mode: ctx.mode, parentDepth });
 
+  // Prepared before spawn: everything from spawn() to the child event handlers
+  // must stay synchronous — an await in between lets a fast spawn failure
+  // (ENOENT from a missing cwd) fire 'error' before any listener attaches,
+  // which escalates to an uncaughtException and kills the host process.
+  await mkdir(OUT_DIR, { recursive: true });
   const child = spawn(
     process.execPath,
     [resolvePiCliEntry(process.argv[1] ?? "", process.env, isPiHost(ctx.sessionManager)), ...cliArgs],
@@ -773,7 +778,6 @@ async function runDelegate(
     // reply and there is no tool activity to stream, so no .activity file.
     const replyFile = join(OUT_DIR, `${runId}.out`);
     const activityFile = join(OUT_DIR, `${runId}.activity`);
-    await mkdir(OUT_DIR, { recursive: true });
     const replyStream = createWriteStream(replyFile, { flags: "a" });
     const activityStream = useJsonStream ? createWriteStream(activityFile, { flags: "a" }) : null;
     const endStream = (s: WriteStream | null): Promise<void> =>
