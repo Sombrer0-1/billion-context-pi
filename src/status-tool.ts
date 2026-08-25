@@ -2,7 +2,7 @@ import { Type, type Static } from "typebox";
 import type { AgentToolResult, ExtensionContext, ToolDefinition } from "@earendil-works/pi-coding-agent";
 import type { AcpRuntime } from "./runtime.js";
 import { buildStatusReport, defaultCountTokens, formatRanges, viableRanges } from "acp-kernel";
-import { estimateTokens, collectCoveredMessageIds, calibrateTokens } from "./tokens.js";
+import { estimateTokens, collectCoveredMessageIds, calibrateTokens, collectImageTokens, modelSupportsImages } from "./tokens.js";
 import { getSystemPromptText } from "./compat.js";
 import { logThrow } from "./log.js";
 import { getDelegateUsage } from "./delegate-tool.js";
@@ -45,7 +45,7 @@ export function makeStatusTool(runtime: AcpRuntime): ToolDefinition<typeof Statu
 }
 
 async function handleStatus(args: StatusArgs, runtime: AcpRuntime, ctx: ExtensionContext): Promise<string> {
-  const { state, coreMessages } = await runtime.stateFor(ctx);
+  const { state, coreMessages, entries } = await runtime.stateFor(ctx);
   const config = runtime.configFor(ctx);
   // Run the same pipeline (assign-refs → prune → hide-compress-calls → ...) that
   // the context transform runs, so what acp_status reports matches what the
@@ -59,7 +59,7 @@ async function handleStatus(args: StatusArgs, runtime: AcpRuntime, ctx: Extensio
   const modelId = (ctx.model as { id?: string } | undefined)?.id ?? "default";
   const systemPromptText = getSystemPromptText(ctx);
   const systemPromptTokens = systemPromptText ? defaultCountTokens(systemPromptText) : 0;
-  const sentTokens = estimateTokens(coreMessages, coveredIds) + systemPromptTokens;
+  const sentTokens = estimateTokens(coreMessages, coveredIds, collectImageTokens(entries, modelSupportsImages(ctx.model))) + systemPromptTokens;
   const turn = runtime.core.processTurn({
     messages: coreMessages,
     state,
