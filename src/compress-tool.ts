@@ -70,10 +70,10 @@ type RangeEntry = Static<typeof RangeSpec>;
 // Normalize the compress args via the kernel's lenient parser (fenced /
 // trailing-comma / raw-newline / double-stringified / truncated-salvage).
 // Returns an error string on bad input — handleCompress THROWS it so pi marks
-// the toolResult isError:true and the retry nudge (src/index.ts) can quote it
-// back (returning it normally would produce isError:false, which both skips
-// the nudge and resets the counter). An empty array passes through (the call
-// site returns "No ranges provided.").
+// the toolResult isError:true, which is what makes the outcome count toward
+// the failure cap (a returned string would land as isError:false and count
+// as neutral). An empty array passes through (the call site returns "No
+// ranges provided.").
 function normalizeRanges(args: CompressArgs): RangeEntry[] | string {
   const { ranges, diagnostics } = parseCompressArgs(args);
   if (ranges.length === 0) {
@@ -141,8 +141,9 @@ function tier3OnlyRewrite(newBlocks: CompressionBlock[], allBlocks: CompressionB
 async function handleCompress(args: CompressArgs, runtime: AcpRuntime, ctx: ExtensionContext, toolCallId?: string): Promise<string> {
   const maybeRanges = normalizeRanges(args);
   // Argument errors throw (not return): pi-agent-core only sets isError:true
-  // on THROWN tool errors, and the retry nudge keys off isError. A returned
-  // string would land as isError:false — no nudge, and the counter resets.
+  // on THROWN tool errors, and the failure counter keys off isError. A
+  // returned string would land as isError:false — neutral, so it neither
+  // counts toward the cap nor lifts it.
   if (typeof maybeRanges === "string") throw new Error(maybeRanges);
   const ranges = maybeRanges;
   if (ranges.length === 0) return "No ranges provided.";

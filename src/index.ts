@@ -7,7 +7,7 @@ import type {
 import type { CoreMessage, NudgeDecision, CompressionBlock, Prompts } from "acp-kernel";
 import { renderNudgeText, resolvePrompts, defaultPrompts, viableRanges } from "acp-kernel";
 import { type AdapterConfig, resolveDelegate } from "./config.js";
-import { createRuntime, type AcpRuntime, MAX_COMPRESS_ATTEMPTS } from "./runtime.js";
+import { createRuntime, type AcpRuntime } from "./runtime.js";
 import { makeCompressTool, isCompressSuccessText, isCompressNoopText } from "./compress-tool.js";
 import { makeDecompressTool } from "./decompress-tool.js";
 import { makeSearchTool } from "./search-tool.js";

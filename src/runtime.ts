@@ -72,9 +72,8 @@ export interface AcpRuntime {
    *  scopes the list — see collectCompressOutcomes in src/index.ts); idempotent
    *  per toolCallId. Outcome classes: isError or noop (0-block panel) →
    *  failure (count++), success panel (>= 1 block) → reset, other non-error
-   *  text → neutral (count unchanged). Returns the failure count, the
-   *  toolCallId of the newest failure that still needs a retry prompt (null
-   *  when none, capped, or count 0), and whether the cap was just reached. */
+    *  text → neutral (count unchanged). Returns the failure count and
+    *  whether the cap was just reached. */
   noteCompressOutcomes(turnKey: string, outcomes: ReadonlyArray<{ toolCallId: string; isError: boolean; success: boolean; noop?: boolean }>): { count: number; cappedNow: boolean };
   /** True when this turn already burned MAX_COMPRESS_ATTEMPTS failed/no-op
    *  compress calls — used to stop re-injecting the (dedup-exempt) emergency
