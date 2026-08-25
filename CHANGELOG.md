@@ -1,6 +1,8 @@
 # Changelog
 
 ## Unreleased (master, since v0.1.38)
+- **fix(delegate): 并发多 agent 时失败必达，不再静默 (#16)** — async delegate 此前有三条失败路径完全不通知主模型(spawn error、结果持久化 error、`sendUserMessage` 注入丢失)，模型未挂在 `acp_delegate_wait` 上时失败被吞，直到收尾汇总才发现少了结果。现在：所有终止路径 best-effort 注入 `FAILED ⚠️` 通知(带错误摘录，与 sync 路径对齐，明确提示"该任务结果缺失、收尾前决定是否重派")；注入失败的 run 进入未送达集，随**下一个** delegate 通知或任何 delegate 工具结果(`acp_delegate`/`wait`/`cancel`)捎带 Recovery notice 补投；Recovery notice 的 delivered 标记改为 carrier 发送成功后才提交（发送抛错不再永久吞掉其他 run 的结果）；system prompt 补充 FAILED/Recovery 通知说明
+- **fix(delegate): bad cwd 等即时 spawn 失败不再击穿宿主 (#16)** — `OUT_DIR` 的 `mkdir` 原本夹在 `spawn()` 与 `child.on("error")` 注册之间：不存在的工作目录使 spawn 立即 ENOENT，错误事件先于监听器注册到达 → uncaughtException → 整个 pi 会话被杀。现在 mkdir 提前到 spawn 之前，spawn 到 close/error 处理器注册全程同步，tmux 实测原崩溃场景稳定注入 FAILED ⚠️ 且宿主存活
 - **fix(guardrail): `toolOutputMaxBytes` 未配置时文档默认值 200000 现在实际生效** — 原接线 `if (max !== undefined && max > 0)` 把「未配置」当成「禁用」，内置 200KB 天花板永远不可达（`capToolOutput` 内部的回退到不了）；pi 只内置 cap bash/read/grep，其余工具可无限注入 context，与 CONFIGURATION.md 承诺的 ACTIVE 默认不符。改为接线层 `?? DEFAULT_TOOL_OUTPUT_MAX_BYTES` 回退，`0`/负数禁用语义不变 (#210)
 
 - **fix(compress): 接受 JSON 字符串形式的 `content` 参数** — 非严格工具 provider（vLLM openai-completions，`supportsStrictTools:false`）会把嵌套数组参数字符串化，pi 的 typebox 校验直接拒掉（`content.0: must be object`）。实测会话 01a00a38 全部唯一一次 compress 调用即死于此，3 小时会话零压缩。schema 改为 `Type.Union([Array, String])`，字符串自动 `JSON.parse` 并校验（错误信息引导模型传数组）

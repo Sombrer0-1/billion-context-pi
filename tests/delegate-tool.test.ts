@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { buildChildArgs, delegateSpawnOptions, injectedWaitMessage, buildWaitResult, buildCancelResult, getDelegateUsage, resetDelegateUsage, injectResult, resolveWaitTimeoutMs } from "../src/delegate-tool.js";
+import { buildChildArgs, delegateSpawnOptions, injectedWaitMessage, buildWaitResult, buildCancelResult, getDelegateUsage, resetDelegateUsage, injectResult, resolveWaitTimeoutMs, findUndeliveredRuns, undeliveredNoticeFrom, buildRecoveryNotice, makeDelegateTool } from "../src/delegate-tool.js";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 
 /** Minimal ctx mock - buildChildArgs reads ctx.model and sessionManager. */
@@ -358,4 +358,111 @@ test("resolveWaitTimeoutMs boundary: 999 → 300000 (seconds→clamp), 0/negativ
   assert.equal(resolveWaitTimeoutMs(999), 300_000);
   assert.equal(resolveWaitTimeoutMs(0), 1_000);
   assert.equal(resolveWaitTimeoutMs(-5), 1_000);
+});
+
+// ─── failure notification visibility (#16): loud FAILED + recovery ─────────
+
+function capturePi(sent: string[]): { sendUserMessage: (text: string) => void } {
+  return { sendUserMessage: (text: string) => sent.push(text) };
+}
+
+test("injectResult failed run uses a loud FAILED header and carries the error excerpt", () => {
+  const sent: string[] = [];
+  const ok = injectResult(capturePi(sent) as any, "reviewer", "del_x", "review auth", 1, "/tmp/del_x.out", undefined, undefined, "separate", false, "Error: provider 429");
+  assert.equal(ok, true, "injection succeeds");
+  const text = sent[0]!;
+  assert.ok(text.includes("[acp_delegate FAILED"), "FAILED header");
+  assert.ok(text.includes("did NOT complete"), "states the result is missing");
+  assert.ok(text.includes("Error: provider 429"), "carries the error excerpt");
+  assert.ok(text.includes("/tmp/del_x.out"), "points at the result file");
+  assert.ok(text.includes("NOT a user message"), "marked automated, not a user message");
+});
+
+test("injectResult completed run keeps the completed header and no body", () => {
+  const sent: string[] = [];
+  const ok = injectResult(capturePi(sent) as any, "reviewer", "del_x", "review auth", 0, "/tmp/del_x.out", undefined, undefined, "separate", false, "must not appear");
+  assert.equal(ok, true, "injection succeeds");
+  const text = sent[0]!;
+  assert.ok(text.includes("[acp_delegate completed]"), "completed header unchanged");
+  assert.ok(!text.includes("FAILED"), "no FAILED marker");
+  assert.ok(!text.includes("must not appear"), "completed runs carry no body");
+});
+
+// ─── undelivered recovery (#16) ─────────────────────────────────────────────
+
+function mkRun(runId: string, status: "completed" | "failed" | "running", over: Record<string, unknown> = {}): any {
+  return {
+    runId,
+    agent: "reviewer",
+    task: "review X",
+    cwd: "/tmp",
+    startedAt: 0,
+    status,
+    result: { code: 1, file: `/tmp/${runId}.out`, body: "boom" },
+    ...over,
+  };
+}
+
+test("findUndeliveredRuns selects terminal runs never delivered to the model", () => {
+  const undelivered = mkRun("del_a", "failed");
+  const all = [
+    undelivered,
+    mkRun("del_b", "failed", { injected: true }),
+    mkRun("del_c", "completed", { consumed: true }),
+    mkRun("del_d", "failed", { waiter: () => {} }),
+    mkRun("del_e", "running"),
+    mkRun("del_self", "failed"),
+  ];
+  const found = findUndeliveredRuns(all, "del_self");
+  assert.deepEqual(found.map((r: any) => r.runId), ["del_a"], "only del_a is undelivered");
+});
+
+test("undeliveredNoticeFrom formats a recovery notice and marks covered runs delivered", () => {
+  const undelivered = mkRun("del_a", "failed");
+  const text = undeliveredNoticeFrom(
+    [undelivered, mkRun("del_b", "failed", { injected: true }), mkRun("del_c", "running")],
+    undefined,
+  );
+  assert.ok(text.includes("Recovery notice"), "recovery header");
+  assert.ok(text.includes("del_a"), "names the undelivered run");
+  assert.ok(text.includes("FAILED"), "failed status visible");
+  assert.ok(text.includes("missing"), "warns work is missing");
+  assert.ok(!text.includes("del_b"), "already-injected runs excluded");
+  assert.ok(!text.includes("del_c"), "running runs excluded");
+  assert.equal(undelivered.injected, true, "covered run marked delivered");
+  assert.equal(undeliveredNoticeFrom([]), "", "empty registry yields no notice");
+});
+
+test("buildRecoveryNotice computes without committing the delivered marking", () => {
+  const undelivered = mkRun("del_a", "failed");
+  const { text, covered } = buildRecoveryNotice([undelivered], undefined);
+  assert.ok(text.includes("Recovery notice"), "recovery text built");
+  assert.deepEqual(covered.map((r: any) => r.runId), ["del_a"], "covered run reported");
+  assert.equal(undelivered.injected, undefined, "not marked before the carrier send commits");
+  const empty = buildRecoveryNotice([mkRun("del_b", "completed", { injected: true })], undefined);
+  assert.equal(empty.text, "", "no undelivered runs yields empty carrier");
+  assert.equal(empty.covered.length, 0);
+});
+
+test("async delegate with missing cwd injects FAILED instead of crashing the host", async () => {
+  const sent: string[] = [];
+  const pi = { sendUserMessage: (t: string) => sent.push(t) } as unknown as Parameters<typeof makeDelegateTool>[0];
+  const tool = makeDelegateTool(pi);
+  const ctx = { ...mockCtx("pi"), mode: "tui", cwd: process.cwd() } as unknown as ExtensionContext;
+  const res = await tool.execute(
+    "tc-spawn-enoent",
+    { agent: "oracle", task: "e2e", cwd: "/nonexistent-e2e-cwd", async: true },
+    undefined,
+    undefined,
+    ctx,
+  );
+  const launch = (res.content[0] as { text?: string }).text ?? "";
+  const runId = /`(del_[a-z0-9_]+)`/.exec(launch)?.[1];
+  assert.ok(runId, `runId in launch message: ${launch}`);
+  const deadline = Date.now() + 5000;
+  while (!sent.length && Date.now() < deadline) await new Promise((r) => setTimeout(r, 50));
+  assert.equal(sent.length, 1, `one injected message, got ${JSON.stringify(sent)}`);
+  assert.match(sent[0]!, /FAILED/);
+  assert.ok(sent[0]!.includes(runId!), "injection names the failed runId");
+  assert.match(sent[0]!, /spawn error/);
 });
